@@ -1,0 +1,230 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}{{ client.company_name }} — Thread{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-lg-9">
+
+    <div class="mb-4 d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <a href="{% url 'outreach:dashboard' %}" class="text-decoration-none text-muted small">
+        <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+      </a>
+      <div class="d-flex gap-2">
+        {% if client.linkedin_url %}
+        <a href="{{ client.linkedin_url }}" target="_blank" rel="noopener noreferrer" class="btn btn-outline-primary btn-sm">
+          <i class="bi bi-box-arrow-up-right me-1"></i>Open LinkedIn
+        </a>
+        {% endif %}
+        <a href="{% url 'outreach:log_linkedin_reachout' client.pk %}" class="btn btn-dc-green btn-sm">
+          <i class="bi bi-linkedin me-1"></i>Log LinkedIn Outreach
+        </a>
+      </div>
+    </div>
+
+    <!-- Client header card -->
+    <div class="card shadow-sm border-0 mb-4">
+      <div class="card-header bg-dc-green text-white py-3 px-4">
+        <h5 class="mb-0 fw-semibold">
+          <i class="bi bi-building me-2"></i>{{ client.company_name }}
+        </h5>
+      </div>
+      <div class="card-body p-4">
+        <div class="row g-3">
+          <div class="col-md-4">
+            <div class="small text-muted">Contact</div>
+            <div class="fw-semibold">{{ client.contact_person }}</div>
+            <div class="small text-muted">{{ client.title|default:"—" }}</div>
+          </div>
+          <div class="col-md-4">
+            <div class="small text-muted">Email</div>
+            <a href="mailto:{{ client.email }}" class="text-decoration-none">{{ client.email }}</a>
+          </div>
+          <div class="col-md-4">
+            <div class="small text-muted">Industry</div>
+            <span class="badge text-bg-light border">{{ client.industry }}</span>
+          </div>
+        </div>
+
+        <hr class="my-3">
+
+        <div class="row g-3">
+          <div class="col-md-3">
+            <div class="small text-muted">Status</div>
+            {% if client.status == "Not Contacted" %}
+              <span class="badge text-bg-secondary">Not Contacted</span>
+            {% elif client.status == "Pinged" %}
+              <span class="badge text-bg-info">Pinged</span>
+            {% elif client.status == "Replied" %}
+              <span class="badge text-bg-primary">Replied</span>
+            {% elif client.status == "Follow Up" %}
+              <span class="badge text-bg-warning text-dark">Follow Up</span>
+            {% elif client.status == "Meeting Set" %}
+              <span class="badge text-bg-success">Meeting Set</span>
+            {% elif client.status == "Rejected" %}
+              <span class="badge text-bg-danger">Rejected</span>
+            {% else %}
+              <span class="badge text-bg-light border">{{ client.status }}</span>
+            {% endif %}
+          </div>
+          <div class="col-md-3">
+            <div class="small text-muted">Sentiment</div>
+            {% if client.sentiment == "Positive" %}
+              <span class="badge text-bg-success">Positive</span>
+            {% elif client.sentiment == "Interested" %}
+              <span class="badge" style="background-color: var(--dc-green); color: #fff;">Interested</span>
+            {% elif client.sentiment == "Neutral" %}
+              <span class="badge text-bg-secondary">Neutral</span>
+            {% elif client.sentiment == "Negative" %}
+              <span class="badge text-bg-danger">Negative</span>
+            {% elif client.sentiment == "Not Interested" %}
+              <span class="badge text-bg-dark">Not Interested</span>
+            {% else %}
+              <span class="badge text-bg-light border text-muted">Unknown</span>
+            {% endif %}
+          </div>
+          <div class="col-md-3">
+            <div class="small text-muted">Follow-ups Sent</div>
+            <div class="fw-semibold">{{ client.followup_count }}</div>
+          </div>
+          <div class="col-md-3">
+            <div class="small text-muted">Last Contacted</div>
+            <div class="fw-semibold">
+              {% if client.last_contacted_at %}
+                {{ client.last_contacted_at|date:"M d, Y" }}
+              {% else %}
+                Never
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm border-0 mb-4">
+      <div class="card-header py-3 px-4" style="background-color: var(--dc-charcoal); color: #fff;">
+        <h6 class="mb-0 fw-semibold">
+          <i class="bi bi-linkedin me-2"></i>LinkedIn Activity
+          <span class="badge bg-light text-dark ms-2">{{ linkedin_reachouts|length }}</span>
+        </h6>
+      </div>
+      <div class="card-body p-4">
+        {% if linkedin_reachouts %}
+          {% for reachout in linkedin_reachouts %}
+          <div class="d-flex gap-3 mb-3 pb-3 {% if not forloop.last %}border-bottom{% endif %}">
+            <div class="flex-shrink-0">
+              <span class="badge rounded-pill bg-light text-primary border">
+                <i class="bi bi-linkedin"></i>
+              </span>
+            </div>
+            <div>
+              <div class="small text-muted">{{ reachout.happened_at|date:"M d, Y H:i" }}</div>
+              <div class="fw-semibold small">{{ reachout.reachout_type }}</div>
+              {% if reachout.notes %}
+              <div class="small">{{ reachout.notes|truncatechars:240 }}</div>
+              {% endif %}
+              {% if reachout.team_member %}
+              <div class="small text-muted">by {{ reachout.team_member.get_full_name|default:reachout.team_member.username }}</div>
+              {% endif %}
+            </div>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="text-center py-4 text-muted">
+            <i class="bi bi-linkedin fs-3 d-block mb-2"></i>
+            No LinkedIn activity logged yet.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Replies -->
+    <div class="card shadow-sm border-0 mb-4">
+      <div class="card-header py-3 px-4" style="background-color: var(--dc-charcoal); color: #fff;">
+        <h6 class="mb-0 fw-semibold">
+          <i class="bi bi-chat-left-text me-2"></i>Replies from {{ client.company_name }}
+          <span class="badge bg-light text-dark ms-2">{{ replies|length }}</span>
+        </h6>
+      </div>
+      <div class="card-body p-4">
+        {% if replies %}
+          {% for reply in replies %}
+          <div class="border rounded p-3 mb-3 {% if forloop.first %}border-start border-3{% endif %}"
+               style="{% if forloop.first %}border-left-color: var(--dc-green) !important;{% endif %}">
+            <div class="d-flex justify-content-between align-items-start mb-2">
+              <div>
+                <strong class="small">{{ reply.subject|default:"(no subject)" }}</strong>
+                <br>
+                <span class="text-muted small">{{ reply.received_at|date:"M d, Y H:i" }}</span>
+              </div>
+              <div>
+                {% if reply.sentiment == "Positive" %}
+                  <span class="badge text-bg-success">Positive</span>
+                {% elif reply.sentiment == "Interested" %}
+                  <span class="badge" style="background-color: var(--dc-green); color: #fff;">Interested</span>
+                {% elif reply.sentiment == "Neutral" %}
+                  <span class="badge text-bg-secondary">Neutral</span>
+                {% elif reply.sentiment == "Negative" %}
+                  <span class="badge text-bg-danger">Negative</span>
+                {% elif reply.sentiment == "Not Interested" %}
+                  <span class="badge text-bg-dark">Not Interested</span>
+                {% else %}
+                  <span class="badge text-bg-light border">Unknown</span>
+                {% endif %}
+              </div>
+            </div>
+            {% if reply.sentiment_summary %}
+              <div class="alert alert-light py-1 px-2 mb-2 small">
+                <i class="bi bi-stars me-1 text-dc-green"></i>{{ reply.sentiment_summary }}
+              </div>
+            {% endif %}
+            <pre class="mb-0 small bg-light rounded p-2" style="white-space: pre-wrap; font-family: inherit; max-height: 200px; overflow-y: auto;">{{ reply.body|truncatechars:2000 }}</pre>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="text-center py-4 text-muted">
+            <i class="bi bi-chat fs-3 d-block mb-2"></i>
+            No replies received yet.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Action log (outgoing) -->
+    <div class="card shadow-sm border-0">
+      <div class="card-header py-3 px-4" style="background-color: var(--dc-charcoal); color: #fff;">
+        <h6 class="mb-0 fw-semibold">
+          <i class="bi bi-send me-2"></i>Outgoing Activity
+          <span class="badge bg-light text-dark ms-2">{{ action_logs|length }}</span>
+        </h6>
+      </div>
+      <div class="card-body p-4">
+        {% if action_logs %}
+          {% for log in action_logs %}
+          <div class="d-flex gap-3 mb-3 pb-3 {% if not forloop.last %}border-bottom{% endif %}">
+            <div class="flex-shrink-0">
+              <span class="badge rounded-pill bg-light text-dc-green border">
+                <i class="bi bi-send-fill"></i>
+              </span>
+            </div>
+            <div>
+              <div class="small text-muted">{{ log.emailed_at|date:"M d, Y H:i" }}</div>
+              <div class="small">{{ log.notes|truncatechars:200 }}</div>
+              {% if log.team_member %}
+                <div class="small text-muted">by {{ log.team_member.get_full_name|default:log.team_member.username }}</div>
+              {% endif %}
+            </div>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="text-center py-4 text-muted">
+            <i class="bi bi-send fs-3 d-block mb-2"></i>
+            No outgoing emails logged yet.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

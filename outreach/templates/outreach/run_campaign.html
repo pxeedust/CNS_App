@@ -1,0 +1,146 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Run Outreach Campaign — CNS Outreach{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-md-9 col-lg-6">
+
+    <div class="mb-4">
+      <a href="{% url 'outreach:dashboard' %}" class="text-decoration-none text-muted small">
+        <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+      </a>
+    </div>
+
+    <div class="card shadow-sm border-0">
+      <div class="card-header bg-dc-green text-white py-3 px-4">
+        <h5 class="mb-0 fw-semibold">
+          <i class="bi bi-send-fill me-2"></i>Run Outreach Campaign
+        </h5>
+      </div>
+      <div class="card-body p-4">
+
+        <!-- AI / static badge -->
+        {% if ai_enabled %}
+        <div class="alert alert-success d-flex align-items-center gap-2 mb-4 py-2">
+          <i class="bi bi-stars fs-5"></i>
+          <div>
+            <strong>Gemini AI active</strong> — each email will be individually personalised using the contact\'s company, industry, keywords, and website.
+          </div>
+        </div>
+        {% else %}
+        <div class="alert alert-warning d-flex align-items-center gap-2 mb-4 py-2">
+          <i class="bi bi-exclamation-triangle fs-5"></i>
+          <div>
+            <strong>AI not configured</strong> — set <code>GOOGLE_API_KEY</code> in your <code>.env</code> to enable Gemini personalisation. The static template will be used for now.
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- Target summary -->
+        <div class="alert alert-info d-flex align-items-start gap-3 mb-4">
+          <i class="bi bi-info-circle-fill fs-5 mt-1 flex-shrink-0"></i>
+          <div>
+            <strong>{{ not_contacted_count }} client{{ not_contacted_count|pluralize }}</strong>
+            with status <em>Not Contacted</em> will receive an email.
+            Their status will automatically be updated to <em>Pinged</em> once sent.
+          </div>
+        </div>
+
+        {% if not_contacted_count == 0 %}
+          <div class="alert alert-warning mb-0">
+            <i class="bi bi-exclamation-triangle-fill me-2"></i>
+            No clients with status <em>Not Contacted</em> found. Import contacts or reset statuses first.
+          </div>
+        {% else %}
+          <form method="post" novalidate>
+            {% csrf_token %}
+
+            <div class="mb-4">
+              <label for="campaign_id" class="form-label fw-semibold">
+                Email Template <span class="text-muted fw-normal">(optional)</span>
+              </label>
+              <select name="campaign_id" id="campaign_id" class="form-select">
+                <option value="">— Use built-in default template —</option>
+                {% for campaign in campaigns %}
+                  <option value="{{ campaign.pk }}">
+                    {{ campaign.name }} &nbsp;·&nbsp; {{ campaign.target_industry }}
+                  </option>
+                {% endfor %}
+              </select>
+              <div class="form-text">
+                Leave blank to use the standard 180DC IIT Kharagpur introduction template.
+              </div>
+            </div>
+
+            <!-- Target summary -->
+            <div class="alert alert-primary d-flex align-items-center gap-3 mb-4">
+              <i class="bi bi-people-fill fs-5 flex-shrink-0"></i>
+              <div>
+                <strong>{{ not_contacted_count }} client{{ not_contacted_count|pluralize }}</strong>
+                will be emailed. Statuses will update to <strong>Pinged</strong> as each send succeeds.
+              </div>
+            </div>
+
+            <!-- Confirmation checkbox -->
+            <div class="form-check mb-4">
+              <input class="form-check-input" type="checkbox" id="confirmSend" required />
+              <label class="form-check-label" for="confirmSend">
+                I confirm I want to send outreach emails to
+                <strong>{{ not_contacted_count }} recipient{{ not_contacted_count|pluralize }}</strong>.
+              </label>
+            </div>
+
+            <!-- Default template preview (collapsible) -->
+            <div class="mb-4">
+              <a class="text-decoration-none text-muted small" data-bs-toggle="collapse"
+                 href="#templatePreview" role="button" aria-expanded="false"
+                 aria-controls="templatePreview">
+                <i class="bi bi-eye me-1"></i>Preview default template
+              </a>
+              <div class="collapse mt-2" id="templatePreview">
+                <div class="card border-0 bg-light">
+                  <div class="card-body py-2 px-3">
+                    <p class="mb-1 small text-muted"><strong>Subject:</strong> {{ default_subject }}</p>
+                    <pre class="mb-0 small" style="white-space: pre-wrap; font-family: inherit;">{{ default_body }}</pre>
+                  </div>
+                </div>
+                <div class="form-text">
+                  <code>{title}</code> = job title from contact record (falls back to <em>Sir/Ma'am</em>),
+                  <code>{last_name}</code> = last name, <code>{company}</code>, <code>{industry}</code>.
+                </div>
+              </div>
+            </div>
+
+            <div class="d-flex gap-2">
+              <button type="submit" id="launchBtn" class="btn btn-dc-green fw-semibold px-4" disabled>
+                <i class="bi bi-send-fill me-2"></i>Send Emails Now
+              </button>
+              <a href="{% url 'outreach:dashboard' %}" class="btn btn-outline-secondary px-4">
+                Cancel
+              </a>
+            </div>
+
+          </form>
+        {% endif %}
+
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  // Only enable the Launch button once the confirmation checkbox is ticked
+  const checkbox = document.getElementById('confirmSend');
+  const btn = document.getElementById('launchBtn');
+  if (checkbox && btn) {
+    checkbox.addEventListener('change', () => {
+      btn.disabled = !checkbox.checked;
+    });
+  }
+</script>
+{% endblock %}
+

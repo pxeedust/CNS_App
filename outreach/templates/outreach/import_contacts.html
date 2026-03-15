@@ -1,0 +1,107 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Import Contacts — CNS Outreach{% endblock %}
+{% block nav_import %}active{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-md-9 col-lg-6">
+
+    <div class="mb-4">
+      <a href="{% url 'outreach:dashboard' %}" class="text-decoration-none text-muted small">
+        <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+      </a>
+    </div>
+
+    <div class="card shadow-sm border-0">
+      <div class="card-header bg-dc-green text-white py-3 px-4">
+        <h5 class="mb-0 fw-semibold">
+          <i class="bi bi-file-earmark-arrow-up me-2"></i>Import Contacts from Apollo CSV
+        </h5>
+      </div>
+      <div class="card-body p-4">
+
+        <!-- Expected format hint -->
+        <div class="alert alert-info small mb-4">
+          <i class="bi bi-info-circle-fill me-2"></i>
+          Upload a CSV exported from <strong>Apollo.io</strong>.
+          Required columns: <code>First Name</code>, <code>Last Name</code>,
+          <code>Company Name</code>, <code>Email</code>, <code>Industry</code>.
+          All other columns below are imported when present.
+          Contacts with duplicate emails are automatically skipped.
+        </div>
+
+        <form method="post" enctype="multipart/form-data" novalidate>
+          {% csrf_token %}
+
+          <!-- File picker -->
+          <div class="mb-4">
+            <label for="{{ form.csv_file.id_for_label }}" class="form-label fw-semibold">
+              {{ form.csv_file.label }}
+            </label>
+            {{ form.csv_file }}
+            {% if form.csv_file.errors %}
+              <div class="invalid-feedback d-block">{{ form.csv_file.errors }}</div>
+            {% endif %}
+          </div>
+
+          <!-- Skip unverified toggle -->
+          <div class="form-check mb-4">
+            {{ form.skip_unverified }}
+            <label class="form-check-label" for="{{ form.skip_unverified.id_for_label }}">
+              {{ form.skip_unverified.label }}
+            </label>
+          </div>
+
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-dc-green fw-semibold px-4">
+              <i class="bi bi-upload me-2"></i>Import
+            </button>
+            <a href="{% url 'outreach:dashboard' %}" class="btn btn-outline-secondary px-4">
+              Cancel
+            </a>
+          </div>
+
+        </form>
+
+      </div>
+    </div>
+
+    <!-- Column reference card -->
+    <div class="card shadow-sm border-0 mt-4">
+      <div class="card-header bg-light py-2 px-4">
+        <span class="fw-semibold small text-muted">
+          <i class="bi bi-table me-1"></i>Apollo column → database field mapping
+        </span>
+      </div>
+      <div class="card-body p-0">
+        <table class="table table-sm table-striped mb-0 small">
+          <thead class="table-light">
+            <tr>
+              <th class="ps-4">Apollo Column</th>
+              <th>Saved As</th>
+              <th>Required?</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td class="ps-4"><code>First Name</code> + <code>Last Name</code></td><td>Contact Person</td><td class="text-danger fw-semibold">Required</td></tr>
+            <tr><td class="ps-4"><code>Company Name</code></td><td>Company Name</td><td class="text-danger fw-semibold">Required</td></tr>
+            <tr><td class="ps-4"><code>Email</code></td><td>Email (unique key)</td><td class="text-danger fw-semibold">Required</td></tr>
+            <tr><td class="ps-4"><code>Industry</code></td><td>Industry</td><td class="text-danger fw-semibold">Required</td></tr>
+            <tr><td class="ps-4"><code>Title</code></td><td>Job Title (used in email salutation)</td><td class="text-muted">Optional</td></tr>
+            <tr><td class="ps-4"><code>Email Status</code></td><td>Skip filter only — not stored</td><td class="text-muted">Optional</td></tr>
+            <tr><td class="ps-4"><code>Work Direct Phone</code> / <code>Phone</code></td><td>Phone</td><td class="text-muted">Optional</td></tr>
+            <tr><td class="ps-4"><code>City</code></td><td>City</td><td class="text-muted">Optional</td></tr>
+            <tr><td class="ps-4"><code>State</code></td><td>State / Region</td><td class="text-muted">Optional</td></tr>
+            <tr><td class="ps-4"><code>Country</code></td><td>Country</td><td class="text-muted">Optional</td></tr>
+            <tr><td class="ps-4"><code>Website</code></td><td>Website</td><td class="text-muted">Optional</td></tr>
+            <tr><td class="ps-4"><code>LinkedIn URL</code></td><td>LinkedIn URL</td><td class="text-muted">Optional</td></tr>
+            <tr><td class="ps-4"><code>Keywords</code></td><td>Keywords / Tags</td><td class="text-muted">Optional</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,79 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Update Status — {{ client.company_name }}{% endblock %}
+
+{% block content %}
+
+<div class="row justify-content-center">
+  <div class="col-12 col-md-8 col-lg-5">
+
+    <div class="mb-4">
+      <a href="{% url 'outreach:dashboard' %}" class="text-decoration-none text-muted small">
+        <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+      </a>
+    </div>
+
+    <div class="card shadow-sm border-0">
+      <div class="card-header bg-dc-green text-white py-3 px-4">
+        <h5 class="mb-0 fw-semibold">
+          <i class="bi bi-pencil-square me-2"></i>Update Client Status
+        </h5>
+      </div>
+      <div class="card-body p-4">
+
+        <!-- Client info summary -->
+        <div class="bg-light rounded p-3 mb-4 small">
+          <div class="row g-1">
+            <div class="col-sm-4 text-muted fw-semibold">Company</div>
+            <div class="col-sm-8 fw-bold">{{ client.company_name }}</div>
+            <div class="col-sm-4 text-muted fw-semibold">Contact</div>
+            <div class="col-sm-8">{{ client.contact_person }}</div>
+            <div class="col-sm-4 text-muted fw-semibold">Industry</div>
+            <div class="col-sm-8">{{ client.industry }}</div>
+            <div class="col-sm-4 text-muted fw-semibold">Current Status</div>
+            <div class="col-sm-8">
+              {% if client.status == "Not Contacted" %}
+                <span class="badge text-bg-secondary">Not Contacted</span>
+              {% elif client.status == "Pinged" %}
+                <span class="badge text-bg-info">Pinged</span>
+              {% elif client.status == "Meeting Set" %}
+                <span class="badge text-bg-success">Meeting Set</span>
+              {% elif client.status == "Rejected" %}
+                <span class="badge text-bg-danger">Rejected</span>
+              {% else %}
+                <span class="badge text-bg-light border">{{ client.status }}</span>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+
+        <form method="post" novalidate>
+          {% csrf_token %}
+
+          <div class="mb-4">
+            <label for="{{ form.status.id_for_label }}" class="form-label fw-semibold">
+              New Status
+            </label>
+            {{ form.status }}
+            {% if form.status.errors %}
+              <div class="invalid-feedback d-block">{{ form.status.errors }}</div>
+            {% endif %}
+          </div>
+
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-dc-green fw-semibold px-4">
+              <i class="bi bi-check-lg me-2"></i>Save Changes
+            </button>
+            <a href="{% url 'outreach:dashboard' %}" class="btn btn-outline-secondary px-4">
+              Cancel
+            </a>
+          </div>
+        </form>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+{% endblock %}

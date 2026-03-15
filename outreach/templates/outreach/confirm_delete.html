@@ -1,0 +1,48 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Delete Contact — CNS Outreach{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-md-6 col-lg-5">
+
+    <div class="mb-4">
+      <a href="{% url 'outreach:dashboard' %}" class="text-decoration-none text-muted small">
+        <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+      </a>
+    </div>
+
+    <div class="card border-danger shadow-sm">
+      <div class="card-header bg-danger text-white py-3 px-4">
+        <h5 class="mb-0 fw-semibold">
+          <i class="bi bi-trash3-fill me-2"></i>Delete Contact
+        </h5>
+      </div>
+      <div class="card-body p-4">
+        <p class="mb-1">
+          You are about to permanently delete:
+        </p>
+        <ul class="list-unstyled bg-light rounded p-3 my-3">
+          <li><strong>Name:</strong> {{ client.contact_person }}</li>
+          {% if client.title %}<li><strong>Title:</strong> {{ client.title }}</li>{% endif %}
+          <li><strong>Company:</strong> {{ client.company_name }}</li>
+          <li><strong>Email:</strong> {{ client.email }}</li>
+          <li><strong>Status:</strong> {{ client.status }}</li>
+        </ul>
+        <p class="text-danger mb-4">
+          <i class="bi bi-exclamation-triangle-fill me-1"></i>
+          This will also delete all associated action logs. This action cannot be undone.
+        </p>
+        <form method="post" class="d-flex gap-2">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-danger fw-semibold px-4">
+            <i class="bi bi-trash3 me-2"></i>Yes, Delete
+          </button>
+          <a href="{% url 'outreach:dashboard' %}" class="btn btn-outline-secondary">Cancel</a>
+        </form>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

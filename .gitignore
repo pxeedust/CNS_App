@@ -1,0 +1,26 @@
+# Environment & secrets
+.env
+credentials.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+
+# Django
+db.sqlite3
+*.log
+media/
+
+# Celery filesystem broker messages
+celery_broker/*
+!celery_broker/.gitkeep
+

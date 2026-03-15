@@ -1,0 +1,108 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}{% if editing %}Edit Member{% else %}Add Member{% endif %} — CNS Outreach{% endblock %}
+{% block nav_team %}active{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-md-8 col-lg-5">
+
+    <div class="mb-4">
+      <a href="{% url 'outreach:team_list' %}" class="text-decoration-none text-muted small">
+        <i class="bi bi-arrow-left me-1"></i>Back to Team
+      </a>
+    </div>
+
+    <div class="card shadow-sm border-0">
+      <div class="card-header bg-dc-green text-white py-3 px-4">
+        <h5 class="mb-0 fw-semibold">
+          {% if editing %}
+            <i class="bi bi-pencil-fill me-2"></i>Edit — {{ target_user.get_full_name|default:target_user.username }}
+          {% else %}
+            <i class="bi bi-person-plus-fill me-2"></i>Add Team Member
+          {% endif %}
+        </h5>
+      </div>
+      <div class="card-body p-4">
+        <form method="post" novalidate>
+          {% csrf_token %}
+
+          <div class="row mb-3">
+            <div class="col-6">
+              <label for="id_first_name" class="form-label fw-semibold">First Name</label>
+              {{ form.first_name }}
+              {% if form.first_name.errors %}
+                <div class="text-danger small mt-1">{{ form.first_name.errors.0 }}</div>
+              {% endif %}
+            </div>
+            <div class="col-6">
+              <label for="id_last_name" class="form-label fw-semibold">Last Name</label>
+              {{ form.last_name }}
+              {% if form.last_name.errors %}
+                <div class="text-danger small mt-1">{{ form.last_name.errors.0 }}</div>
+              {% endif %}
+            </div>
+          </div>
+
+          {% if not editing %}
+          <div class="mb-3">
+            <label for="id_username" class="form-label fw-semibold">Username</label>
+            {{ form.username }}
+            {% if form.username.errors %}
+              <div class="text-danger small mt-1">{{ form.username.errors.0 }}</div>
+            {% endif %}
+          </div>
+          {% endif %}
+
+          <div class="mb-3">
+            <label for="id_email" class="form-label fw-semibold">Email</label>
+            {{ form.email }}
+            {% if form.email.errors %}
+              <div class="text-danger small mt-1">{{ form.email.errors.0 }}</div>
+            {% endif %}
+          </div>
+
+          {% if not editing %}
+          <div class="mb-3">
+            <label for="id_password" class="form-label fw-semibold">Password</label>
+            {{ form.password }}
+            {% if form.password.errors %}
+              <div class="text-danger small mt-1">{{ form.password.errors.0 }}</div>
+            {% endif %}
+          </div>
+          {% endif %}
+
+          <div class="mb-3">
+            <label for="id_role" class="form-label fw-semibold">Role</label>
+            {{ form.role }}
+            <div class="form-text">
+              <strong>Admin</strong> — can manage team members &amp; all settings.
+              <strong>Member</strong> — can use outreach features.
+            </div>
+          </div>
+
+          {% if editing %}
+          <div class="mb-3 form-check form-switch">
+            {{ form.is_active }}
+            <label class="form-check-label" for="id_is_active">Account active</label>
+          </div>
+          {% endif %}
+
+          <div class="d-flex gap-2 mt-4">
+            <button type="submit" class="btn btn-dc-green fw-semibold px-4">
+              {% if editing %}
+                <i class="bi bi-check-lg me-1"></i>Save Changes
+              {% else %}
+                <i class="bi bi-person-plus-fill me-1"></i>Create Account
+              {% endif %}
+            </button>
+            <a href="{% url 'outreach:team_list' %}" class="btn btn-outline-secondary px-4">Cancel</a>
+          </div>
+
+        </form>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

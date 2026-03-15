@@ -1,0 +1,258 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Dashboard - CNS Outreach{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+
+{% block content %}
+
+<!-- Page header -->
+<div class="d-flex align-items-center justify-content-between mb-4 flex-wrap gap-2">
+  <div>
+    <h3 class="fw-bold mb-0">Client Dashboard</h3>
+    <p class="text-muted mb-0 small">
+      {{ clients|length }} client{{ clients|length|pluralize }} shown
+      {% if active_filter %}&mdash; filtered by <strong>{{ active_filter }}</strong>{% endif %}
+      {% if member_filter %}&mdash; showing <strong>{{ member_filter }}</strong>'s clients{% endif %}
+      {% if company_filter %}&mdash; company search <strong>{{ company_filter }}</strong>{% endif %}
+    </p>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a href="{% url 'outreach:run_campaign' %}" class="btn btn-dc-green fw-semibold">
+      <i class="bi bi-send-fill me-2"></i>Run Outreach Campaign
+    </a>
+    <a href="{% url 'outreach:add_contact' %}" class="btn btn-outline-dc-green fw-semibold">
+      <i class="bi bi-person-plus me-2"></i>Add Contact
+    </a>
+  </div>
+</div>
+
+<!-- Admin member filter + view toggle -->
+{% if is_admin_user %}
+<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+  <span class="text-muted small fw-semibold me-1">Filter by member:</span>
+  <a href="{% url 'outreach:dashboard' %}{% if active_filter or company_filter %}?{% endif %}{% if active_filter %}status={{ active_filter|urlencode }}{% endif %}{% if active_filter and company_filter %}&{% endif %}{% if company_filter %}company={{ company_filter|urlencode }}{% endif %}"
+     class="btn btn-sm {% if not member_filter %}btn-dc-green{% else %}btn-outline-dc-green{% endif %}">
+    All Members
+  </a>
+  {% for m in all_members %}
+  <a href="?member={{ m.user.username|urlencode }}{% if active_filter %}&status={{ active_filter|urlencode }}{% endif %}{% if company_filter %}&company={{ company_filter|urlencode }}{% endif %}"
+     class="btn btn-sm {% if member_filter == m.user.username %}btn-dc-green{% else %}btn-outline-dc-green{% endif %}">
+    <i class="bi bi-person me-1"></i>{{ m.user.get_full_name|default:m.user.username }}
+  </a>
+  {% endfor %}
+  <a href="?member=__shared__{% if active_filter %}&status={{ active_filter|urlencode }}{% endif %}{% if company_filter %}&company={{ company_filter|urlencode }}{% endif %}"
+     class="btn btn-sm {% if member_filter == '__shared__' %}btn-secondary{% else %}btn-outline-secondary{% endif %}">
+    <i class="bi bi-globe me-1"></i>Shared Pool
+  </a>
+</div>
+{% endif %}
+
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-body">
+    <form method="get" class="row g-2 align-items-end">
+      {% if member_filter %}
+      <input type="hidden" name="member" value="{{ member_filter }}">
+      {% endif %}
+      {% if active_filter %}
+      <input type="hidden" name="status" value="{{ active_filter }}">
+      {% endif %}
+      <div class="col-12 col-md-8 col-lg-6">
+        <label for="company-filter" class="form-label small fw-semibold text-muted mb-1">Filter by company</label>
+        <input
+          id="company-filter"
+          type="text"
+          name="company"
+          value="{{ company_filter }}"
+          list="company-options"
+          class="form-control"
+          placeholder="Type a company name"
+        >
+        <datalist id="company-options">
+          {% for company in company_choices %}
+          <option value="{{ company }}"></option>
+          {% endfor %}
+        </datalist>
+      </div>
+      <div class="col-12 col-md-auto">
+        <button type="submit" class="btn btn-dc-green w-100">
+          <i class="bi bi-funnel me-1"></i>Apply
+        </button>
+      </div>
+      <div class="col-12 col-md-auto">
+        <a href="{% url 'outreach:dashboard' %}{% if member_filter or active_filter %}?{% endif %}{% if member_filter %}member={{ member_filter|urlencode }}{% endif %}{% if member_filter and active_filter %}&{% endif %}{% if active_filter %}status={{ active_filter|urlencode }}{% endif %}"
+           class="btn btn-outline-secondary w-100">
+          Clear Company
+        </a>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Status filter bar -->
+<div class="filter-bar d-flex flex-wrap gap-2 mb-4">
+  <a href="{% url 'outreach:dashboard' %}{% if member_filter or company_filter %}?{% endif %}{% if member_filter %}member={{ member_filter|urlencode }}{% endif %}{% if member_filter and company_filter %}&{% endif %}{% if company_filter %}company={{ company_filter|urlencode }}{% endif %}"
+     class="btn btn-sm {% if not active_filter %}btn-dc-green{% else %}btn-outline-dc-green{% endif %}">
+    All
+  </a>
+  {% for value, label in status_choices %}
+    <a href="?status={{ value|urlencode }}{% if member_filter %}&member={{ member_filter|urlencode }}{% endif %}{% if company_filter %}&company={{ company_filter|urlencode }}{% endif %}"
+       class="btn btn-sm {% if active_filter == value %}btn-dc-green{% else %}btn-outline-dc-green{% endif %}">
+      {{ label }}
+    </a>
+  {% endfor %}
+</div>
+
+<!-- Client table -->
+<div class="card shadow-sm border-0">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead style="background-color: var(--dc-charcoal); color: #fff;">
+          <tr>
+            <th scope="col" class="ps-4">Company</th>
+            <th scope="col">Contact</th>
+            <th scope="col">Industry</th>
+            <th scope="col">Status</th>
+            <th scope="col">Sentiment</th>
+            <th scope="col">Follow-ups</th>
+            <th scope="col">LinkedIn</th>
+            <th scope="col">Last Contacted</th>
+            {% if is_admin_user %}<th scope="col">Assigned To</th>{% endif %}
+            <th scope="col" class="text-center pe-4">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for client in clients %}
+          <tr>
+            <td class="ps-4 fw-semibold">
+              <a href="?company={{ client.company_name|urlencode }}{% if active_filter %}&status={{ active_filter|urlencode }}{% endif %}{% if member_filter %}&member={{ member_filter|urlencode }}{% endif %}"
+                 class="text-decoration-none text-body">
+                {{ client.company_name }}
+              </a>
+            </td>
+            <td>
+              {{ client.contact_person }}
+              <br>
+              <a href="mailto:{{ client.email }}" class="text-decoration-none text-body-secondary small">
+                {{ client.email }}
+              </a>
+              {% if client.linkedin_url %}
+                <br>
+                <a href="{{ client.linkedin_url }}" target="_blank" rel="noopener noreferrer"
+                   class="text-decoration-none small">
+                  <i class="bi bi-linkedin me-1"></i>LinkedIn
+                </a>
+              {% endif %}
+            </td>
+            <td><span class="badge text-bg-light border">{{ client.industry }}</span></td>
+            <td>
+              {% if client.status == "Not Contacted" %}
+                <span class="badge text-bg-secondary status-badge">Not Contacted</span>
+              {% elif client.status == "Pinged" %}
+                <span class="badge text-bg-info status-badge">Pinged</span>
+              {% elif client.status == "Replied" %}
+                <span class="badge text-bg-primary status-badge">Replied</span>
+              {% elif client.status == "Follow Up" %}
+                <span class="badge text-bg-warning text-dark status-badge">Follow Up</span>
+              {% elif client.status == "Meeting Set" %}
+                <span class="badge text-bg-success status-badge">Meeting Set</span>
+              {% elif client.status == "Rejected" %}
+                <span class="badge text-bg-danger status-badge">Rejected</span>
+              {% else %}
+                <span class="badge text-bg-light border status-badge">{{ client.status }}</span>
+              {% endif %}
+              {% if client.has_replied %}
+                <br><i class="bi bi-reply-fill text-success small" title="Has replied"></i>
+                <span class="text-success small">Replied</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if client.sentiment == "Positive" %}
+                <span class="badge text-bg-success">Positive</span>
+              {% elif client.sentiment == "Interested" %}
+                <span class="badge" style="background-color: var(--dc-green); color:#fff;">Interested</span>
+              {% elif client.sentiment == "Neutral" %}
+                <span class="badge text-bg-secondary">Neutral</span>
+              {% elif client.sentiment == "Negative" %}
+                <span class="badge text-bg-danger">Negative</span>
+              {% elif client.sentiment == "Not Interested" %}
+                <span class="badge text-bg-dark">Not Interested</span>
+              {% else %}
+                <span class="badge text-bg-light border text-muted">&mdash;</span>
+              {% endif %}
+            </td>
+            <td class="text-center">
+              {% if client.followup_count > 0 %}
+                <span class="badge text-bg-warning text-dark">{{ client.followup_count }}x</span>
+              {% else %}
+                <span class="text-muted small">&mdash;</span>
+              {% endif %}
+            </td>
+            <td class="text-center">
+              {% if client.linkedin_reachouts_count > 0 %}
+                <span class="badge text-bg-primary">{{ client.linkedin_reachouts_count }}</span>
+                {% if client.last_linkedin_at %}
+                  <div class="text-muted small mt-1">{{ client.last_linkedin_at|date:"M d" }}</div>
+                {% endif %}
+              {% else %}
+                <span class="text-muted small">&mdash;</span>
+              {% endif %}
+            </td>
+            <td class="text-muted small">
+              {% if client.last_contacted_at %}
+                {{ client.last_contacted_at|date:"M d, Y" }}
+              {% else %}
+                <span class="text-muted fst-italic">Never</span>
+              {% endif %}
+            </td>
+            {% if is_admin_user %}
+            <td class="small">
+              {% if client.assigned_to %}
+                <i class="bi bi-person-fill text-dc-green me-1"></i>
+                {{ client.assigned_to.get_full_name|default:client.assigned_to.username }}
+              {% else %}
+                <span class="text-muted fst-italic"><i class="bi bi-globe me-1"></i>Shared</span>
+              {% endif %}
+            </td>
+            {% endif %}
+            <td class="text-center pe-4">
+              <div class="btn-group btn-group-sm" role="group">
+                <a href="{% url 'outreach:client_thread' client.pk %}"
+                   class="btn btn-outline-dc-green" title="View thread">
+                  <i class="bi bi-chat-dots"></i>
+                </a>
+                <a href="{% url 'outreach:log_linkedin_reachout' client.pk %}"
+                   class="btn btn-outline-primary" title="Log LinkedIn outreach">
+                  <i class="bi bi-linkedin"></i>
+                </a>
+                <a href="{% url 'outreach:edit_contact' client.pk %}"
+                   class="btn btn-outline-secondary" title="Edit contact">
+                  <i class="bi bi-pencil"></i>
+                </a>
+                <a href="{% url 'outreach:update_client_status' client.pk %}"
+                   class="btn btn-outline-dark" title="Update status">
+                  <i class="bi bi-flag"></i>
+                </a>
+                <a href="{% url 'outreach:delete_contact' client.pk %}"
+                   class="btn btn-outline-danger" title="Delete contact">
+                  <i class="bi bi-trash3"></i>
+                </a>
+              </div>
+            </td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="{% if is_admin_user %}10{% else %}9{% endif %}" class="text-center py-5 text-muted">
+              <i class="bi bi-inbox fs-3 d-block mb-2"></i>
+              No clients found
+              {% if active_filter %}for status <strong>{{ active_filter }}</strong>{% endif %}.
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,99 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Follow-ups — 180DC Outreach{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-md-10 col-lg-8">
+
+    <div class="mb-4">
+      <a href="{% url 'outreach:dashboard' %}" class="text-decoration-none text-muted small">
+        <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+      </a>
+    </div>
+
+    <div class="card shadow-sm border-0 mb-4">
+      <div class="card-header bg-dc-green text-white py-3 px-4">
+        <h5 class="mb-0 fw-semibold">
+          <i class="bi bi-arrow-repeat me-2"></i>Send Follow-up Emails
+        </h5>
+      </div>
+      <div class="card-body p-4">
+
+        <div class="alert alert-info d-flex align-items-start gap-2 mb-4">
+          <i class="bi bi-info-circle-fill mt-1"></i>
+          <div>
+            Follow-ups are sent to <strong>Pinged</strong> or <strong>Follow Up</strong> clients
+            who haven't replied. The system waits <strong>3, 7, and 14 days</strong> between
+            each follow-up (max {{ max_followups }} follow-ups per client).
+          </div>
+        </div>
+
+        {% if candidates %}
+          <div class="mb-4">
+            <h6 class="fw-semibold mb-3">
+              {{ candidates|length }} client{{ candidates|length|pluralize }} eligible for follow-up
+            </h6>
+            <div class="table-responsive">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light">
+                  <tr>
+                    <th>Company</th>
+                    <th>Contact</th>
+                    <th>Follow-ups Sent</th>
+                    <th>Last Contacted</th>
+                    <th>Next Due</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for c in candidates %}
+                  <tr>
+                    <td class="fw-semibold">{{ c.company_name }}</td>
+                    <td class="small">{{ c.contact_person }}</td>
+                    <td>
+                      <span class="badge text-bg-warning text-dark">{{ c.followup_count }}x</span>
+                      <span class="text-muted small"> / {{ max_followups }}</span>
+                    </td>
+                    <td class="text-muted small">
+                      {% if c.last_contacted_at %}
+                        {{ c.last_contacted_at|date:"M d, Y" }}
+                      {% else %}
+                        —
+                      {% endif %}
+                    </td>
+                    <td class="text-muted small">
+                      {% if c.next_followup_at %}
+                        {{ c.next_followup_at|date:"M d, Y" }}
+                      {% else %}
+                        Now
+                      {% endif %}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <form method="post">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-dc-green fw-semibold px-4">
+              <i class="bi bi-send me-2"></i>Send Follow-ups Now
+            </button>
+          </form>
+        {% else %}
+          <div class="text-center py-4 text-muted">
+            <i class="bi bi-check-circle fs-3 d-block mb-2"></i>
+            No clients are currently eligible for follow-up emails.
+            <br>
+            <span class="small">Clients need to be in <em>Pinged</em> or <em>Follow Up</em> status
+              with no reply and fewer than {{ max_followups }} follow-ups sent.</span>
+          </div>
+        {% endif %}
+
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

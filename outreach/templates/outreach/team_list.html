@@ -1,0 +1,86 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Team Members — CNS Outreach{% endblock %}
+{% block nav_team %}active{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-lg-10">
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h4 class="mb-0 fw-bold text-dc-green">
+        <i class="bi bi-people-fill me-2"></i>Team Members
+      </h4>
+      <a href="{% url 'outreach:team_add' %}" class="btn btn-dc-green">
+        <i class="bi bi-person-plus-fill me-1"></i>Add Member
+      </a>
+    </div>
+
+    <div class="card shadow-sm border-0">
+      <div class="table-responsive">
+        <table class="table table-dc table-hover mb-0 align-middle">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Username</th>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Joined</th>
+              <th class="text-end">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in members %}
+            <tr{% if not m.user.is_active %} class="text-muted"{% endif %}>
+              <td class="fw-semibold">
+                <i class="bi bi-person-circle me-1 text-dc-green"></i>
+                {{ m.user.get_full_name|default:m.user.username }}
+              </td>
+              <td><code>{{ m.user.username }}</code></td>
+              <td>{{ m.user.email }}</td>
+              <td>
+                {% if m.role == "Admin" %}
+                  <span class="badge bg-danger">Admin</span>
+                {% else %}
+                  <span class="badge bg-secondary">Member</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if m.user.is_active %}
+                  <span class="badge bg-success">Active</span>
+                {% else %}
+                  <span class="badge bg-warning text-dark">Inactive</span>
+                {% endif %}
+              </td>
+              <td class="small text-muted">{{ m.created_at|date:"d M Y" }}</td>
+              <td class="text-end">
+                <a href="{% url 'outreach:team_edit' m.pk %}"
+                   class="btn btn-sm btn-outline-dc-green me-1"
+                   title="Edit">
+                  <i class="bi bi-pencil"></i>
+                </a>
+                {% if m.user != request.user and m.user.is_active %}
+                <a href="{% url 'outreach:team_delete' m.pk %}"
+                   class="btn btn-sm btn-outline-danger"
+                   title="Deactivate">
+                  <i class="bi bi-person-x"></i>
+                </a>
+                {% endif %}
+              </td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="7" class="text-center text-muted py-4">
+                No team members yet. Click <strong>Add Member</strong> to create the first account.
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

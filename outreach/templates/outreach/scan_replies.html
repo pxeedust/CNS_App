@@ -1,0 +1,115 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Scan Replies — 180DC Outreach{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-md-10 col-lg-8">
+
+    <div class="mb-4">
+      <a href="{% url 'outreach:dashboard' %}" class="text-decoration-none text-muted small">
+        <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+      </a>
+    </div>
+
+    <div class="card shadow-sm border-0 mb-4">
+      <div class="card-header bg-dc-green text-white py-3 px-4">
+        <h5 class="mb-0 fw-semibold">
+          <i class="bi bi-inbox-fill me-2"></i>Scan Inbox for Replies
+        </h5>
+      </div>
+      <div class="card-body p-4">
+
+        <!-- Stats row -->
+        <div class="row text-center g-3 mb-4">
+          <div class="col-6">
+            <div class="border rounded p-3">
+              <div class="fs-3 fw-bold text-info">{{ total_pinged }}</div>
+              <div class="text-muted small">Awaiting Reply</div>
+            </div>
+          </div>
+          <div class="col-6">
+            <div class="border rounded p-3">
+              <div class="fs-3 fw-bold text-success">{{ total_replied }}</div>
+              <div class="text-muted small">Have Replied</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="alert alert-info d-flex align-items-start gap-2 mb-4">
+          <i class="bi bi-info-circle-fill mt-1"></i>
+          <div>
+            This will connect to your email inbox via IMAP, search for replies from
+            all <strong>Pinged</strong> and <strong>Follow Up</strong> clients, and
+            automatically analyse the sentiment of each reply using Gemini AI.
+          </div>
+        </div>
+
+        <form method="post">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-dc-green fw-semibold px-4">
+            <i class="bi bi-arrow-repeat me-2"></i>Scan Inbox Now
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Recent replies -->
+    {% if recent_replies %}
+    <div class="card shadow-sm border-0">
+      <div class="card-header py-3 px-4" style="background-color: var(--dc-charcoal); color: #fff;">
+        <h6 class="mb-0 fw-semibold">
+          <i class="bi bi-chat-left-text me-2"></i>Recent Replies
+        </h6>
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-hover align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th class="ps-4">Company</th>
+                <th>Subject</th>
+                <th>Sentiment</th>
+                <th>Received</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for reply in recent_replies %}
+              <tr>
+                <td class="ps-4 fw-semibold">{{ reply.client.company_name }}</td>
+                <td class="small">{{ reply.subject|truncatechars:60 }}</td>
+                <td>
+                  {% if reply.sentiment == "Positive" %}
+                    <span class="badge text-bg-success">Positive</span>
+                  {% elif reply.sentiment == "Interested" %}
+                    <span class="badge" style="background-color: var(--dc-green); color:#fff;">Interested</span>
+                  {% elif reply.sentiment == "Neutral" %}
+                    <span class="badge text-bg-secondary">Neutral</span>
+                  {% elif reply.sentiment == "Negative" %}
+                    <span class="badge text-bg-danger">Negative</span>
+                  {% elif reply.sentiment == "Not Interested" %}
+                    <span class="badge text-bg-dark">Not Interested</span>
+                  {% else %}
+                    <span class="badge text-bg-light border">Unknown</span>
+                  {% endif %}
+                </td>
+                <td class="text-muted small">{{ reply.received_at|date:"M d, Y H:i" }}</td>
+                <td>
+                  <a href="{% url 'outreach:client_thread' reply.client.pk %}"
+                     class="btn btn-sm btn-outline-dc-green" title="View thread">
+                    <i class="bi bi-chat-dots"></i>
+                  </a>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}

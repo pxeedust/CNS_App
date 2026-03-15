@@ -1,0 +1,45 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Deactivate Member — CNS Outreach{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-md-6 col-lg-4">
+
+    <div class="mb-4">
+      <a href="{% url 'outreach:team_list' %}" class="text-decoration-none text-muted small">
+        <i class="bi bi-arrow-left me-1"></i>Back to Team
+      </a>
+    </div>
+
+    <div class="card shadow-sm border-0">
+      <div class="card-header bg-danger text-white py-3 px-4">
+        <h5 class="mb-0 fw-semibold">
+          <i class="bi bi-person-x-fill me-2"></i>Deactivate Account
+        </h5>
+      </div>
+      <div class="card-body p-4">
+        <p>
+          Are you sure you want to deactivate the account for
+          <strong>{{ target_user.get_full_name|default:target_user.username }}</strong>
+          (<code>{{ target_user.username }}</code>)?
+        </p>
+        <p class="text-muted small mb-4">
+          This will prevent them from logging in. Their data (action logs, etc.) will be preserved.
+          You can re-activate the account later by editing the member.
+        </p>
+        <form method="post">
+          {% csrf_token %}
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-danger fw-semibold px-4">
+              <i class="bi bi-person-x me-1"></i>Deactivate
+            </button>
+            <a href="{% url 'outreach:team_list' %}" class="btn btn-outline-secondary px-4">Cancel</a>
+          </div>
+        </form>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
