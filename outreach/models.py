@@ -186,6 +186,25 @@ class TeamMember(models.Model):
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
     role = models.CharField(max_length=10, choices=Role.choices, default=Role.MEMBER)
+    sender_name = models.CharField(
+        max_length=150,
+        blank=True,
+        help_text="Name shown in outbound outreach emails.",
+    )
+    sender_role = models.CharField(
+        max_length=150,
+        blank=True,
+        help_text="Role/title shown in the email signature.",
+    )
+    mailbox_email = models.EmailField(
+        blank=True,
+        help_text="Mailbox used for outbound email and IMAP reply scanning.",
+    )
+    mailbox_app_password = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="App password or mailbox password used for SMTP/IMAP.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -193,6 +212,18 @@ class TeamMember(models.Model):
 
     def __str__(self):
         return f"{self.user.get_full_name() or self.user.username} ({self.role})"
+
+    @property
+    def effective_sender_name(self):
+        return self.sender_name or self.user.get_full_name() or self.user.username
+
+    @property
+    def effective_sender_role(self):
+        return self.sender_role or "Team Member"
+
+    @property
+    def effective_mailbox_email(self):
+        return self.mailbox_email or self.user.email
 
 
 class LinkedInReachout(models.Model):

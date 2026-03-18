@@ -107,7 +107,15 @@ class EmailReplyAdmin(admin.ModelAdmin):
 
 @admin.register(TeamMember)
 class TeamMemberAdmin(admin.ModelAdmin):
-    list_display = ("user", "role", "get_email", "get_active", "created_at")
+    list_display = (
+        "user",
+        "role",
+        "get_email",
+        "get_mailbox_email",
+        "get_sender_name",
+        "get_active",
+        "created_at",
+    )
     list_filter = ("role",)
     search_fields = (
         "user__username",
@@ -119,6 +127,14 @@ class TeamMemberAdmin(admin.ModelAdmin):
     @admin.display(description="Email")
     def get_email(self, obj):
         return obj.user.email
+
+    @admin.display(description="Mailbox")
+    def get_mailbox_email(self, obj):
+        return obj.mailbox_email or obj.user.email or "-"
+
+    @admin.display(description="Sender Name")
+    def get_sender_name(self, obj):
+        return obj.sender_name or obj.user.get_full_name() or obj.user.username
 
     @admin.display(description="Active", boolean=True)
     def get_active(self, obj):

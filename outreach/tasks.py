@@ -15,14 +15,22 @@ from datetime import timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.header import decode_header
-from email.utils import parsedate_to_datetime
+from email.utils import formataddr, parsedate_to_datetime
 
 from google import genai
 from celery import shared_task
 from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
 
-from .models import ActionLog, CampaignRun, Client, EmailReply, OutreachCampaign
+from .models import (
+    ActionLog,
+    CampaignRun,
+    Client,
+    EmailReply,
+    OutreachCampaign,
+    TeamMember,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +61,56 @@ def _build_email_body(client, campaign):
         return template
 
 
+def _resolve_sender_profile(user=None):
+    """Resolve sender identity + mailbox credentials for the triggering user."""
+    profile = getattr(user, "profile", None) if user else None
+    sender_name = (
+        (profile.effective_sender_name if profile else "")
+        or (user.get_full_name() if user else "")
+        or (user.username if user else "")
+        or "180DC Outreach"
+    )
+    sender_role = (
+        (profile.effective_sender_role if profile else "") or "Team Member"
+    )
+    mailbox_email = (
+        (profile.effective_mailbox_email if profile else "")
+        or (user.email if user else "")
+    )
+    mailbox_password = (profile.mailbox_app_password if profile else "") or ""
+    smtp_host = getattr(settings, "EMAIL_HOST", "smtp.gmail.com")
+    smtp_port = getattr(settings, "EMAIL_PORT", 587)
+    imap_host = getattr(settings, "IMAP_HOST", "imap.gmail.com")
+    imap_port = int(getattr(settings, "IMAP_PORT", 993))
+
+    return {
+        "sender_name": sender_name,
+        "sender_role": sender_role,
+        "mailbox_email": mailbox_email,
+        "mailbox_password": mailbox_password,
+        "smtp_host": smtp_host,
+        "smtp_port": smtp_port,
+        "imap_host": imap_host,
+        "imap_port": imap_port,
+        "from_header": formataddr((sender_name, mailbox_email)) if mailbox_email else sender_name,
+    }
+
+
+def _validate_sender_profile(sender_profile):
+    if not sender_profile["mailbox_email"]:
+        return "Mailbox email is not configured for this user."
+    if not sender_profile["mailbox_password"]:
+        return "Mailbox app password is not configured for this user."
+    return None
+
+
 def _send_single_email(
     *,
     recipient_email: str,
     subject: str,
     body: str,
     cc_emails: list[str],
+    sender_profile: dict,
 ) -> tuple[bool, str]:
     """
     Send one email via SMTP using credentials from Django settings (sourced from
@@ -67,18 +119,18 @@ def _send_single_email(
     This function is deliberately isolated so that a failure on one recipient
     never crashes the outer task loop.
     """
-    sender = settings.EMAIL_HOST_USER
-    password = settings.EMAIL_HOST_PASSWORD
-    smtp_host = settings.EMAIL_HOST
-    smtp_port = settings.EMAIL_PORT
+    sender = sender_profile["mailbox_email"]
+    password = sender_profile["mailbox_password"]
+    smtp_host = sender_profile["smtp_host"]
+    smtp_port = sender_profile["smtp_port"]
 
     if not sender or not password:
-        return False, "EMAIL_HOST_USER or EMAIL_HOST_PASSWORD not configured in .env"
+        return False, "Mailbox email or app password is not configured for this user."
 
     try:
         msg = MIMEMultipart()
         msg["Subject"] = subject
-        msg["From"] = sender
+        msg["From"] = sender_profile["from_header"]
         msg["To"] = recipient_email
         if cc_emails:
             msg["Cc"] = ", ".join(cc_emails)
@@ -109,23 +161,26 @@ def _send_single_email(
 _DEFAULT_SUBJECT_TPL = "180DC IIT Kharagpur X {company}"
 _DEFAULT_BODY_TPL = """Respected {title} {last_name},
 
-I am Parth Sethi, Executive Head at 180 Degrees Consulting, IIT Kharagpur — a student-run consultancy providing strategic and operational services to organisations aiming for greater impact. We've partnered with the CRY Foundation and Robin Hood Army on operational strategy, user engagement, and program scalability.
+I am {sender_name}, {sender_role} at 180 Degrees Consulting, IIT Kharagpur — a student-run consultancy providing strategic and operational services to organisations aiming for greater impact. We've partnered with the CRY Foundation and Robin Hood Army on operational strategy, user engagement, and program scalability.
 
 We'd love to explore how our data-driven consulting could support {company}'s goals in {industry}. Could we schedule a brief call to discuss this?
 
 Best regards,
-Parth Sethi
-Executive Head, 180 Degrees Consulting, IIT Kharagpur
+{sender_name}
+{sender_role}
+180 Degrees Consulting, IIT Kharagpur
 https://www.180dc.org/branches/IITKGP
 """
 
 
-def _build_default_body(client):
+def _build_default_body(client, sender_profile):
     """Render the built-in fallback email body for a client."""
     parts = client.contact_person.split()
     last_name = parts[-1] if parts else client.contact_person
     salutation = client.title.strip() if client.title else "Sir/Ma'am"
     return _DEFAULT_BODY_TPL.format(
+        sender_name=sender_profile["sender_name"],
+        sender_role=sender_profile["sender_role"],
         title=salutation,
         last_name=last_name,
         industry=client.industry,
@@ -164,7 +219,7 @@ def _google_search_snippets(ai_client, model_name, company, industry, website):
         return ""
 
 
-def _generate_ai_email(client, campaign=None) -> tuple[str, str]:
+def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str]:
     """
     Generate a fully personalised subject + body for *client* using Gemini.
 
@@ -182,7 +237,7 @@ def _generate_ai_email(client, campaign=None) -> tuple[str, str]:
             client.pk,
         )
         subject = _DEFAULT_SUBJECT_TPL.format(company=client.company_name)
-        return subject, _build_default_body(client)
+        return subject, _build_default_body(client, sender_profile)
 
     try:
         ai_client = genai.Client(api_key=api_key)
@@ -206,9 +261,9 @@ def _generate_ai_email(client, campaign=None) -> tuple[str, str]:
         )
 
         # -- Step 2: Build the consultant identity ----------------------------
-        consultant_name = "Parth Sethi"
-        consultant_email = getattr(settings, "EMAIL_HOST_USER", "")
-        consultant_role = "Executive Head"
+        consultant_name = sender_profile["sender_name"]
+        consultant_email = sender_profile["mailbox_email"]
+        consultant_role = sender_profile["sender_role"]
 
         campaign_context = ""
         if campaign:
@@ -308,7 +363,7 @@ def _generate_ai_email(client, campaign=None) -> tuple[str, str]:
             exc,
         )
         subject = _DEFAULT_SUBJECT_TPL.format(company=client.company_name)
-        return subject, _build_default_body(client)
+        return subject, _build_default_body(client, sender_profile)
 
 
 # ---------------------------------------------------------------------------
@@ -366,13 +421,26 @@ def send_automated_pings(
         except User.DoesNotExist:
             pass
 
+    sender_profile = _resolve_sender_profile(triggering_user)
+    sender_error = _validate_sender_profile(sender_profile)
+    if sender_error:
+        logger.warning("send_automated_pings: %s", sender_error)
+        _update_run(status=CampaignRun.RunStatus.FAILED, current_step="mailbox setup")
+        return {"status": "error", "sent": 0, "failed": 0, "error": sender_error}
+
     # -- CC list from settings -----------------------------------------------
     cc_raw = getattr(settings, "OUTREACH_CC_EMAILS", "")
     cc_emails = [e.strip() for e in cc_raw.split(",") if e.strip()]
 
     # -- Fetch target clients ------------------------------------------------
     clients = list(
-        Client.objects.filter(status=Client.Status.NOT_CONTACTED).select_related()
+        Client.objects.filter(status=Client.Status.NOT_CONTACTED)
+        .filter(
+            Q(assigned_to=triggering_user) | Q(assigned_to__isnull=True)
+            if triggering_user
+            else Q()
+        )
+        .select_related()
     )
 
     if not clients:
@@ -416,7 +484,7 @@ def send_automated_pings(
 
         # -- Progress: generating --------------------------------------------
         _update_run(current_step="generating")
-        subject, body = _generate_ai_email(client, campaign)
+        subject, body = _generate_ai_email(client, sender_profile, campaign)
 
         # -- Progress: sending -----------------------------------------------
         _update_run(current_step="sending")
@@ -425,6 +493,7 @@ def send_automated_pings(
             subject=subject,
             body=body,
             cc_emails=cc_emails,
+            sender_profile=sender_profile,
         )
 
         if success:
@@ -663,7 +732,7 @@ def _process_imap_message(msg, client, debug_log):
     }
 
 
-def scan_inbox_for_replies():
+def scan_inbox_for_replies(triggered_by_user_id: int | None = None):
     """
     Connect to IMAP, scan for replies from pinged/follow-up clients,
     create EmailReply records, run sentiment analysis, and update client status.
@@ -680,17 +749,32 @@ def scan_inbox_for_replies():
     """
     from datetime import date
 
-    imap_host = getattr(settings, "IMAP_HOST", "imap.gmail.com")
-    imap_port = int(getattr(settings, "IMAP_PORT", 993))
-    username = settings.EMAIL_HOST_USER
-    password = settings.EMAIL_HOST_PASSWORD
+    from django.contrib.auth.models import User
 
-    if not username or not password:
-        return {"error": "Email credentials not configured"}
+    triggering_user = None
+    if triggered_by_user_id:
+        try:
+            triggering_user = User.objects.get(pk=triggered_by_user_id)
+        except User.DoesNotExist:
+            pass
+
+    sender_profile = _resolve_sender_profile(triggering_user)
+    sender_error = _validate_sender_profile(sender_profile)
+    imap_host = sender_profile["imap_host"]
+    imap_port = sender_profile["imap_port"]
+    username = sender_profile["mailbox_email"]
+    password = sender_profile["mailbox_password"]
+
+    if sender_error:
+        return {"error": sender_error}
 
     # Clients we want to check for replies
     scannable = Client.objects.filter(
         status__in=[Client.Status.PINGED, Client.Status.FOLLOW_UP],
+    ).filter(
+        Q(assigned_to=triggering_user) | Q(assigned_to__isnull=True)
+        if triggering_user
+        else Q()
     ).exclude(email="")
 
     if not scannable.exists():
@@ -917,7 +1001,7 @@ _FOLLOWUP_INTERVALS = [3, 7, 14]
 _MAX_FOLLOWUPS = 3
 
 
-def _generate_followup_email(client, followup_number) -> tuple[str, str]:
+def _generate_followup_email(client, followup_number, sender_profile) -> tuple[str, str]:
     """
     Generate a follow-up email using Gemini AI.
     Adapts tone based on which follow-up round this is.
@@ -944,8 +1028,9 @@ def _generate_followup_email(client, followup_number) -> tuple[str, str]:
             f"data-driven strategy and operational consulting. Would you have a few minutes "
             f"for a brief call this week?\n\n"
             f"Best regards,\n"
-            f"Parth Sethi\n"
-            f"Executive Head, 180 Degrees Consulting, IIT Kharagpur\n"
+            f"{sender_profile['sender_name']}\n"
+            f"{sender_profile['sender_role']}\n"
+            f"180 Degrees Consulting, IIT Kharagpur\n"
             f"https://www.180dc.org/branches/IITKGP\n"
         )
         return subject, body
@@ -968,14 +1053,14 @@ def _generate_followup_email(client, followup_number) -> tuple[str, str]:
         prompt = (
             f"Write a {ordinal} follow-up email for a consulting outreach that received no reply.\n\n"
             f"Tone: {tone_guidance.get(followup_number, tone_guidance[3])}\n\n"
-            f"Consultant: Parth Sethi, Executive Head, 180 Degrees Consulting, IIT Kharagpur\n"
+            f"Consultant: {sender_profile['sender_name']}, {sender_profile['sender_role']}, 180 Degrees Consulting, IIT Kharagpur\n"
             f"Recipient: {first_name} {last_name}, {title or 'N/A'} at {company}\n"
             f"Industry: {client.industry}\n"
             f"Company Website: {client.website or 'N/A'}\n\n"
             "RULES:\n"
             f"1. Subject line: 'Following up — 180DC IIT Kharagpur X {company}'\n"
             "2. Greeting: 'Respected {salutation} {last_name},' on its own line.\n"
-            "3. End with the signature: Parth Sethi / Executive Head / 180 Degrees Consulting, IIT Kharagpur / https://www.180dc.org/branches/IITKGP\n"
+            f"3. End with the signature: {sender_profile['sender_name']} / {sender_profile['sender_role']} / 180 Degrees Consulting, IIT Kharagpur / https://www.180dc.org/branches/IITKGP\n"
             "4. No markdown formatting.\n"
             "5. Sound warm and human.\n\n"
             "Output ONLY: subject line on first line, blank line, then full email body."
@@ -1001,16 +1086,12 @@ def _generate_followup_email(client, followup_number) -> tuple[str, str]:
     except Exception as exc:
         logger.warning("Follow-up generation failed for %s: %s", company, exc)
         return (
-            _generate_followup_email.__wrapped__(client, followup_number)
-            if hasattr(_generate_followup_email, "__wrapped__")
-            else (
-                f"Following up — 180DC IIT Kharagpur X {company}",
-                _build_default_body(client),
-            )
+            f"Following up — 180DC IIT Kharagpur X {company}",
+            _build_default_body(client, sender_profile),
         )
 
 
-def send_followups():
+def send_followups(triggered_by_user_id: int | None = None):
     """
     Send follow-up emails to clients who were pinged but haven't replied,
     respecting follow-up intervals and max follow-up count.
@@ -1020,6 +1101,25 @@ def send_followups():
     intervals = getattr(settings, "FOLLOWUP_INTERVALS_DAYS", _FOLLOWUP_INTERVALS)
     max_followups = getattr(settings, "MAX_FOLLOWUPS", _MAX_FOLLOWUPS)
     now = timezone.now()
+    from django.contrib.auth.models import User
+
+    triggering_user = None
+    if triggered_by_user_id:
+        try:
+            triggering_user = User.objects.get(pk=triggered_by_user_id)
+        except User.DoesNotExist:
+            pass
+
+    sender_profile = _resolve_sender_profile(triggering_user)
+    sender_error = _validate_sender_profile(sender_profile)
+    if sender_error:
+        return {
+            "sent": 0,
+            "skipped": 0,
+            "failed": 0,
+            "details": [],
+            "error": sender_error,
+        }
 
     # Find clients eligible for follow-up:
     # status = Pinged or Follow Up, haven't exceeded max, and enough time has passed
@@ -1027,6 +1127,10 @@ def send_followups():
         status__in=[Client.Status.PINGED, Client.Status.FOLLOW_UP],
         has_replied=False,
         followup_count__lt=max_followups,
+    ).filter(
+        Q(assigned_to=triggering_user) | Q(assigned_to__isnull=True)
+        if triggering_user
+        else Q()
     ).exclude(email="")
 
     cc_raw = getattr(settings, "OUTREACH_CC_EMAILS", "")
@@ -1051,12 +1155,13 @@ def send_followups():
             skipped_count += 1
             continue
 
-        subject, body = _generate_followup_email(client, followup_num)
+        subject, body = _generate_followup_email(client, followup_num, sender_profile)
         success, message = _send_single_email(
             recipient_email=client.email,
             subject=subject,
             body=body,
             cc_emails=cc_emails,
+            sender_profile=sender_profile,
         )
 
         if success:
@@ -1082,6 +1187,7 @@ def send_followups():
             )
 
             ActionLog.objects.create(
+                team_member=triggering_user,
                 client=client,
                 notes=f"Follow-up #{followup_num}. Subject: {subject}",
             )

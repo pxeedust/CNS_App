@@ -28,6 +28,7 @@ urlpatterns = [
     ),
     path("replies/scan/", views.scan_replies, name="scan_replies"),
     path("client/<int:pk>/thread/", views.client_thread, name="client_thread"),
+    path("mailbox/", views.mailbox_settings, name="mailbox_settings"),
     path(
         "client/<int:pk>/linkedin/",
         views.log_linkedin_reachout,

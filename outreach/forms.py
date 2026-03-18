@@ -129,6 +129,36 @@ class CreateUserForm(forms.Form):
             attrs={**_TEXT_INPUT, "placeholder": "Min 8 characters"}
         ),
     )
+    sender_name = forms.CharField(
+        max_length=150,
+        required=False,
+        widget=forms.TextInput(
+            attrs={**_TEXT_INPUT, "placeholder": "Defaults to full name"}
+        ),
+    )
+    sender_role = forms.CharField(
+        max_length=150,
+        required=False,
+        widget=forms.TextInput(
+            attrs={**_TEXT_INPUT, "placeholder": "e.g. Executive Head"}
+        ),
+    )
+    mailbox_email = forms.EmailField(
+        required=False,
+        widget=forms.EmailInput(
+            attrs={**_TEXT_INPUT, "placeholder": "Mailbox used for sends and scans"}
+        ),
+    )
+    mailbox_app_password = forms.CharField(
+        required=False,
+        widget=forms.PasswordInput(
+            attrs={
+                **_TEXT_INPUT,
+                "placeholder": "Mailbox app password",
+            },
+            render_value=True,
+        ),
+    )
     role = forms.ChoiceField(
         choices=TeamMember.Role.choices,
         initial=TeamMember.Role.MEMBER,
@@ -158,6 +188,36 @@ class EditUserForm(forms.Form):
         max_length=150, widget=forms.TextInput(attrs=_TEXT_INPUT)
     )
     email = forms.EmailField(widget=forms.EmailInput(attrs=_TEXT_INPUT))
+    sender_name = forms.CharField(
+        max_length=150,
+        required=False,
+        widget=forms.TextInput(
+            attrs={**_TEXT_INPUT, "placeholder": "Defaults to full name"}
+        ),
+    )
+    sender_role = forms.CharField(
+        max_length=150,
+        required=False,
+        widget=forms.TextInput(
+            attrs={**_TEXT_INPUT, "placeholder": "e.g. Executive Head"}
+        ),
+    )
+    mailbox_email = forms.EmailField(
+        required=False,
+        widget=forms.EmailInput(
+            attrs={**_TEXT_INPUT, "placeholder": "Mailbox used for sends and scans"}
+        ),
+    )
+    mailbox_app_password = forms.CharField(
+        required=False,
+        widget=forms.PasswordInput(
+            attrs={
+                **_TEXT_INPUT,
+                "placeholder": "Leave unchanged if not updating",
+            },
+            render_value=True,
+        ),
+    )
     role = forms.ChoiceField(
         choices=TeamMember.Role.choices,
         widget=forms.Select(attrs=_SELECT),
@@ -166,4 +226,37 @@ class EditUserForm(forms.Form):
         required=False,
         widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
         label="Account active",
+    )
+
+
+class MailboxSettingsForm(forms.Form):
+    sender_name = forms.CharField(
+        max_length=150,
+        required=False,
+        widget=forms.TextInput(
+            attrs={**_TEXT_INPUT, "placeholder": "Defaults to your full name"}
+        ),
+    )
+    sender_role = forms.CharField(
+        max_length=150,
+        required=False,
+        widget=forms.TextInput(
+            attrs={**_TEXT_INPUT, "placeholder": "e.g. Executive Head"}
+        ),
+    )
+    mailbox_email = forms.EmailField(
+        required=False,
+        widget=forms.EmailInput(
+            attrs={**_TEXT_INPUT, "placeholder": "Mailbox used for send/scan"}
+        ),
+    )
+    mailbox_app_password = forms.CharField(
+        required=False,
+        widget=forms.PasswordInput(
+            attrs={
+                **_TEXT_INPUT,
+                "placeholder": "Mailbox app password",
+            },
+            render_value=True,
+        ),
     )

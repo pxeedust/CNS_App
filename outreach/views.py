@@ -17,6 +17,7 @@ from .forms import (
     CreateUserForm,
     EditUserForm,
     LinkedInReachoutForm,
+    MailboxSettingsForm,
 )
 from .models import (
     CampaignRun,
@@ -281,6 +282,14 @@ def dashboard(request):
     if company_filter:
         clients = clients.filter(company_name__icontains=company_filter)
 
+    dashboard_stats = {
+        "total_clients": clients.count(),
+        "company_count": clients.values("company_name").distinct().count(),
+        "replied_count": clients.filter(has_replied=True).count(),
+        "meeting_count": clients.filter(status=Client.Status.MEETING_SET).count(),
+        "linkedin_touchpoints": LinkedInReachout.objects.filter(client__in=clients).count(),
+    }
+
     # For admin member-picker dropdown
     all_members = (
         TeamMember.objects.select_related("user").all() if is_admin_user else []
@@ -295,6 +304,7 @@ def dashboard(request):
         "active_filter": status_filter,
         "company_filter": company_filter,
         "company_choices": company_choices,
+        "dashboard_stats": dashboard_stats,
         "is_admin_user": is_admin_user,
         "member_filter": member_filter,
         "all_members": all_members,
@@ -337,9 +347,14 @@ def run_campaign(request):
     campaigns = OutreachCampaign.objects.all()
     not_contacted_count = Client.objects.filter(
         status=Client.Status.NOT_CONTACTED
-    ).count()
+    ).filter(Q(assigned_to=request.user) | Q(assigned_to__isnull=True)).count()
 
     if request.method == "POST":
+        mailbox_ready, mailbox_error = _validate_user_mailbox(request.user)
+        if not mailbox_ready:
+            messages.error(request, mailbox_error)
+            return redirect("outreach:mailbox_settings")
+
         campaign_id_raw = request.POST.get("campaign_id") or None
         campaign_id = int(campaign_id_raw) if campaign_id_raw else None
 
@@ -406,7 +421,12 @@ def scan_replies(request):
     """
 
     if request.method == "POST":
-        result = scan_inbox_for_replies()
+        mailbox_ready, mailbox_error = _validate_user_mailbox(request.user)
+        if not mailbox_ready:
+            messages.error(request, mailbox_error)
+            return redirect("outreach:mailbox_settings")
+
+        result = scan_inbox_for_replies(triggered_by_user_id=request.user.pk)
 
         if "error" in result:
             messages.error(request, f"Scan failed: {result['error']}")
@@ -438,9 +458,13 @@ def scan_replies(request):
     # Stats for the GET page
     total_pinged = Client.objects.filter(
         status__in=[Client.Status.PINGED, Client.Status.FOLLOW_UP]
+    ).filter(Q(assigned_to=request.user) | Q(assigned_to__isnull=True)).count()
+    total_replied = Client.objects.filter(has_replied=True).filter(
+        Q(assigned_to=request.user) | Q(assigned_to__isnull=True)
     ).count()
-    total_replied = Client.objects.filter(has_replied=True).count()
-    recent_replies = EmailReply.objects.select_related("client")[:20]
+    recent_replies = EmailReply.objects.select_related("client").filter(
+        Q(client__assigned_to=request.user) | Q(client__assigned_to__isnull=True)
+    )[:20]
 
     return render(
         request,
@@ -514,10 +538,19 @@ def run_followups(request):
     from datetime import timedelta
 
     if request.method == "POST":
-        result = send_followups()
+        mailbox_ready, mailbox_error = _validate_user_mailbox(request.user)
+        if not mailbox_ready:
+            messages.error(request, mailbox_error)
+            return redirect("outreach:mailbox_settings")
+
+        result = send_followups(triggered_by_user_id=request.user.pk)
         sent = result.get("sent", 0)
         failed = result.get("failed", 0)
         skipped = result.get("skipped", 0)
+
+        if result.get("error"):
+            messages.error(request, result["error"])
+            return redirect("outreach:run_followups")
 
         if sent:
             messages.success(
@@ -546,6 +579,7 @@ def run_followups(request):
             has_replied=False,
             followup_count__lt=max_followups,
         )
+        .filter(Q(assigned_to=request.user) | Q(assigned_to__isnull=True))
         .exclude(email="")
         .order_by("last_contacted_at")
     )
@@ -571,6 +605,18 @@ def _is_admin(user):
         return True
     profile = getattr(user, "profile", None)
     return profile and profile.role == TeamMember.Role.ADMIN
+
+
+def _validate_user_mailbox(user):
+    profile = getattr(user, "profile", None)
+    if not profile:
+        return False, "Create your team profile mailbox settings before sending or scanning mail."
+    mailbox_email = profile.mailbox_email or user.email
+    if not mailbox_email:
+        return False, "Set your mailbox email in My Mailbox before sending or scanning mail."
+    if not profile.mailbox_app_password:
+        return False, "Set your mailbox app password in My Mailbox before sending or scanning mail."
+    return True, ""
 
 
 @login_required
@@ -601,7 +647,14 @@ def team_add(request):
                 first_name=form.cleaned_data["first_name"],
                 last_name=form.cleaned_data["last_name"],
             )
-            TeamMember.objects.create(user=user, role=form.cleaned_data["role"])
+            TeamMember.objects.create(
+                user=user,
+                role=form.cleaned_data["role"],
+                sender_name=form.cleaned_data["sender_name"],
+                sender_role=form.cleaned_data["sender_role"],
+                mailbox_email=form.cleaned_data["mailbox_email"],
+                mailbox_app_password=form.cleaned_data["mailbox_app_password"],
+            )
             messages.success(
                 request,
                 f"Account created for <strong>{user.get_full_name()}</strong> "
@@ -634,6 +687,10 @@ def team_edit(request, pk):
             target_user.is_active = form.cleaned_data["is_active"]
             target_user.save()
             profile.role = form.cleaned_data["role"]
+            profile.sender_name = form.cleaned_data["sender_name"]
+            profile.sender_role = form.cleaned_data["sender_role"]
+            profile.mailbox_email = form.cleaned_data["mailbox_email"]
+            profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
             profile.save()
             messages.success(
                 request,
@@ -647,6 +704,10 @@ def team_edit(request, pk):
                 "first_name": target_user.first_name,
                 "last_name": target_user.last_name,
                 "email": target_user.email,
+                "sender_name": profile.sender_name,
+                "sender_role": profile.sender_role,
+                "mailbox_email": profile.mailbox_email,
+                "mailbox_app_password": profile.mailbox_app_password,
                 "role": profile.role,
                 "is_active": target_user.is_active,
             }
@@ -656,6 +717,38 @@ def team_edit(request, pk):
         request,
         "outreach/team_form.html",
         {"form": form, "editing": True, "target_user": target_user, "profile": profile},
+    )
+
+
+@login_required
+def mailbox_settings(request):
+    """Allow a user to configure their sender identity and mailbox credentials."""
+    profile, _ = TeamMember.objects.get_or_create(user=request.user)
+
+    if request.method == "POST":
+        form = MailboxSettingsForm(request.POST)
+        if form.is_valid():
+            profile.sender_name = form.cleaned_data["sender_name"]
+            profile.sender_role = form.cleaned_data["sender_role"]
+            profile.mailbox_email = form.cleaned_data["mailbox_email"]
+            profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
+            profile.save()
+            messages.success(request, "Mailbox settings updated.")
+            return redirect("outreach:mailbox_settings")
+    else:
+        form = MailboxSettingsForm(
+            initial={
+                "sender_name": profile.sender_name,
+                "sender_role": profile.sender_role,
+                "mailbox_email": profile.mailbox_email,
+                "mailbox_app_password": profile.mailbox_app_password,
+            }
+        )
+
+    return render(
+        request,
+        "outreach/mailbox_settings.html",
+        {"form": form, "profile": profile},
     )
 
 

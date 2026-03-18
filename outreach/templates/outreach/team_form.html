@@ -62,6 +62,42 @@
             {% endif %}
           </div>
 
+          <div class="row mb-3">
+            <div class="col-md-6">
+              <label for="id_sender_name" class="form-label fw-semibold">Sender Name</label>
+              {{ form.sender_name }}
+              {% if form.sender_name.errors %}
+                <div class="text-danger small mt-1">{{ form.sender_name.errors.0 }}</div>
+              {% endif %}
+            </div>
+            <div class="col-md-6">
+              <label for="id_sender_role" class="form-label fw-semibold">Sender Role</label>
+              {{ form.sender_role }}
+              {% if form.sender_role.errors %}
+                <div class="text-danger small mt-1">{{ form.sender_role.errors.0 }}</div>
+              {% endif %}
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label for="id_mailbox_email" class="form-label fw-semibold">Mailbox Email</label>
+            {{ form.mailbox_email }}
+            {% if form.mailbox_email.errors %}
+              <div class="text-danger small mt-1">{{ form.mailbox_email.errors.0 }}</div>
+            {% endif %}
+          </div>
+
+          <div class="mb-3">
+            <label for="id_mailbox_app_password" class="form-label fw-semibold">Mailbox App Password</label>
+            {{ form.mailbox_app_password }}
+            {% if form.mailbox_app_password.errors %}
+              <div class="text-danger small mt-1">{{ form.mailbox_app_password.errors.0 }}</div>
+            {% endif %}
+            <div class="form-text">
+              Used for both sending outreach and scanning replies for this user.
+            </div>
+          </div>
+
           {% if not editing %}
           <div class="mb-3">
             <label for="id_password" class="form-label fw-semibold">Password</label>

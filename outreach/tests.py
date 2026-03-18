@@ -1,8 +1,14 @@
+from unittest.mock import patch
+from datetime import timedelta
+
 from django.contrib.auth.models import User
 from django.test import TestCase
+from django.test.utils import override_settings
 from django.urls import reverse
+from django.utils import timezone
 
-from .models import Client, LinkedInReachout, TeamMember
+from .models import ActionLog, Client, LinkedInReachout, TeamMember
+from .tasks import send_followups
 
 
 class LinkedInReachoutFlowTests(TestCase):
@@ -161,3 +167,102 @@ class DashboardCompanyFilterTests(TestCase):
         self.assertEqual(response.context["company_filter"], "Acme")
         self.assertIn("Acme Corp", response.context["company_choices"])
         self.assertIn("Beta Labs", response.context["company_choices"])
+
+
+class UserMailboxSettingsTests(TestCase):
+    def setUp(self):
+        self.member = User.objects.create_user(
+            username="member_mailbox",
+            password="testpass123",
+            first_name="Mailbox",
+            last_name="Owner",
+            email="mailbox.owner@test.com",
+        )
+        TeamMember.objects.create(user=self.member, role=TeamMember.Role.MEMBER)
+
+    def test_run_campaign_requires_mailbox_setup(self):
+        self.client.force_login(self.member)
+
+        response = self.client.post(reverse("outreach:run_campaign"), {})
+
+        self.assertRedirects(response, reverse("outreach:mailbox_settings"))
+
+
+class PersonalizedFollowupTests(TestCase):
+    def setUp(self):
+        self.member = User.objects.create_user(
+            username="member_sender",
+            password="testpass123",
+            first_name="Asha",
+            last_name="Rao",
+            email="asha@test.com",
+        )
+        self.member_profile = TeamMember.objects.create(
+            user=self.member,
+            role=TeamMember.Role.MEMBER,
+            sender_name="Asha Rao",
+            sender_role="Outreach Lead",
+            mailbox_email="asha.mail@test.com",
+            mailbox_app_password="app-pass-123",
+        )
+
+        self.other_member = User.objects.create_user(
+            username="member_other",
+            password="testpass123",
+            first_name="Parth",
+            last_name="Other",
+            email="parth@test.com",
+        )
+        TeamMember.objects.create(
+            user=self.other_member,
+            role=TeamMember.Role.MEMBER,
+            sender_name="Parth Other",
+            sender_role="Analyst",
+            mailbox_email="parth.mail@test.com",
+            mailbox_app_password="other-pass",
+        )
+
+        self.member_client = Client.objects.create(
+            company_name="Own Client",
+            contact_person="Client One",
+            email="own@test.com",
+            industry="Consulting",
+            assigned_to=self.member,
+            status=Client.Status.PINGED,
+            last_contacted_at=timezone.now() - timedelta(days=10),
+        )
+        self.other_client = Client.objects.create(
+            company_name="Other Client",
+            contact_person="Client Two",
+            email="other@test.com",
+            industry="SaaS",
+            assigned_to=self.other_member,
+            status=Client.Status.PINGED,
+            last_contacted_at=timezone.now() - timedelta(days=10),
+        )
+
+    @patch("outreach.tasks._send_single_email")
+    @override_settings(GOOGLE_API_KEY="")
+    def test_followups_use_logged_in_user_mailbox_and_scope(self, mock_send):
+        captured = {}
+
+        def _fake_send(**kwargs):
+            captured["sender_profile"] = kwargs["sender_profile"]
+            captured["recipient_email"] = kwargs["recipient_email"]
+            return True, "Sent"
+
+        mock_send.side_effect = _fake_send
+
+        result = send_followups(triggered_by_user_id=self.member.pk)
+
+        self.member_client.refresh_from_db()
+        self.other_client.refresh_from_db()
+
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(captured["recipient_email"], "own@test.com")
+        self.assertEqual(captured["sender_profile"]["sender_name"], "Asha Rao")
+        self.assertEqual(captured["sender_profile"]["mailbox_email"], "asha.mail@test.com")
+        self.assertEqual(self.member_client.status, Client.Status.FOLLOW_UP)
+        self.assertEqual(self.other_client.status, Client.Status.PINGED)
+        action_log = ActionLog.objects.get(client=self.member_client)
+        self.assertEqual(action_log.team_member, self.member)
