@@ -1,6 +1,6 @@
 {% extends "outreach/base.html" %}
 
-{% block title %}Campaign Progress — CNS Outreach{% endblock %}
+{% block title %}{{ run_label|default:"Campaign" }} Progress — CNS Outreach{% endblock %}
 
 {% block content %}
 <div class="row justify-content-center">
@@ -15,7 +15,7 @@
     <div class="card shadow-sm border-0">
       <div class="card-header bg-dc-green text-white py-3 px-4 d-flex align-items-center justify-content-between">
         <h5 class="mb-0 fw-semibold">
-          <i class="bi bi-send-fill me-2"></i>Campaign Run #{{ run.pk }}
+          <i class="bi bi-send-fill me-2"></i>{{ run_label|default:"Campaign" }} Run #{{ run.pk }}
         </h5>
         <span id="statusBadge" class="badge bg-warning text-dark">Running</span>
       </div>
@@ -91,7 +91,7 @@
 <script>
 (function() {
   const RUN_ID = {{ run.pk }};
-  const API_URL = "{% url 'outreach:campaign_progress_api' run_id=run.pk %}";
+  const API_URL = "{{ api_url }}";
   const POLL_INTERVAL = 1500; // ms
 
   const progressBar  = document.getElementById('progressBar');

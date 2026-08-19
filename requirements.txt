@@ -7,9 +7,11 @@ click-didyoumean==0.3.1
 click-plugins==1.1.1.2
 click-repl==0.3.0
 colorama==0.4.6
+cryptography==41.0.7
 dj-database-url==3.1.2
 Django==6.0.3
 django_celery_results==2.6.0
+google-genai==1.75.0
 gunicorn==25.1.0
 h11==0.16.0
 kombu==5.6.2
@@ -18,8 +20,11 @@ prompt_toolkit==3.0.52
 psycopg2-binary==2.9.11
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
+redis==5.3.1
+sentry-sdk==2.42.1
 six==1.17.0
 sqlparse==0.5.5
+tenacity==9.1.4
 tzdata==2025.3
 tzlocal==5.3.1
 uvicorn==0.41.0

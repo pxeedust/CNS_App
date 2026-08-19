@@ -1,0 +1,146 @@
+{% extends "outreach/base.html" %}
+
+{% block title %}Reliability - CNS Outreach{% endblock %}
+{% block nav_reliability %}active{% endblock %}
+
+{% block content %}
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <div>
+    <h3 class="fw-bold mb-0"><i class="bi bi-shield-check me-2" style="color: var(--dc-green);"></i>Sending Reliability</h3>
+    <p class="text-muted mb-0 small">Gemini fallback rate, SMTP failures, and stuck sends over the last {{ window_days }} days — admin view only</p>
+  </div>
+  <a href="{% url 'outreach:dashboard' %}" class="btn btn-outline-dc-green">
+    <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+  </a>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="p-3 rounded-3 bg-light text-center">
+      <div class="display-6 fw-bold" style="color: var(--dc-green);">{{ total_sent }}</div>
+      <div class="text-muted small mt-1">Emails Sent</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="p-3 rounded-3 bg-light text-center">
+      <div class="display-6 fw-bold text-primary">{{ ai_used_count }}</div>
+      <div class="text-muted small mt-1">AI-Generated</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="p-3 rounded-3 bg-light text-center">
+      <div class="display-6 fw-bold text-warning">{{ fallback_count }}</div>
+      <div class="text-muted small mt-1">Template Fallback</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="p-3 rounded-3 bg-light text-center">
+      <div class="display-6 fw-bold {% if overall_fallback_rate > 20 %}text-danger{% else %}text-success{% endif %}">
+        {% if overall_fallback_rate != None %}{{ overall_fallback_rate }}%{% else %}—{% endif %}
+      </div>
+      <div class="text-muted small mt-1">Gemini Fallback Rate</div>
+    </div>
+  </div>
+</div>
+
+{% if stuck_clients %}
+<div class="alert alert-danger">
+  <i class="bi bi-exclamation-triangle-fill me-2"></i>
+  <strong>{{ stuck_clients|length }}</strong> client(s) have been stuck in "Sending" status for over 15 minutes —
+  this can mean a worker crashed mid-send. Check whether the email actually went out before resending manually.
+  <ul class="mb-0 mt-2 small">
+    {% for c in stuck_clients %}
+    <li>{{ c.company_name }} — {{ c.email }} (updated {{ c.updated_at }})</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-header fw-semibold py-3" style="background: var(--dc-green-light); border-bottom: 2px solid var(--dc-green);">
+    <i class="bi bi-list-check me-2" style="color: var(--dc-green);"></i>Recent Runs
+  </div>
+  <div class="card-body p-0">
+    {% if run_rows %}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead style="background-color: var(--dc-charcoal); color: #fff;">
+          <tr>
+            <th class="ps-4">Type</th>
+            <th>#</th>
+            <th>Status</th>
+            <th>Started</th>
+            <th class="text-center">Progress</th>
+            <th class="text-center">Sent</th>
+            <th class="text-center">Failed</th>
+            <th class="text-center">AI Fallback Rate</th>
+            <th class="text-center">SMTP Failure Rate</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in run_rows %}
+          <tr>
+            <td class="ps-4">{{ run.kind }}</td>
+            <td>#{{ run.pk }}</td>
+            <td>
+              {% if run.status == "completed" %}
+                <span class="badge text-bg-success">Completed</span>
+              {% elif run.status == "failed" %}
+                <span class="badge text-bg-danger">Failed</span>
+              {% else %}
+                <span class="badge text-bg-warning text-dark">Running</span>
+              {% endif %}
+            </td>
+            <td class="small text-muted">{{ run.started_at }}</td>
+            <td class="text-center">{{ run.processed }}/{{ run.total }}</td>
+            <td class="text-center text-success">{{ run.sent }}</td>
+            <td class="text-center text-danger">{{ run.failed }}</td>
+            <td class="text-center">{% if run.ai_fallback_rate != None %}{{ run.ai_fallback_rate }}%{% else %}—{% endif %}</td>
+            <td class="text-center">{% if run.smtp_failure_rate != None %}{{ run.smtp_failure_rate }}%{% else %}—{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-4 text-muted">No runs yet.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card shadow-sm border-0">
+  <div class="card-header fw-semibold py-3" style="background: #f8f9fa; border-bottom: 2px solid #6c757d;">
+    <i class="bi bi-stars me-2 text-muted"></i>Recent Gemini Fallbacks
+  </div>
+  <div class="card-body p-0">
+    {% if recent_fallbacks %}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead style="background-color: var(--dc-charcoal); color: #fff;">
+          <tr>
+            <th class="ps-4">Client</th>
+            <th>Sent By</th>
+            <th>When</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for log in recent_fallbacks %}
+          <tr>
+            <td class="ps-4">{{ log.client.company_name }}</td>
+            <td>{{ log.team_member.get_full_name|default:log.team_member.username }}</td>
+            <td class="small text-muted">{{ log.emailed_at }}</td>
+            <td class="small">{{ log.ai_failure_reason|default:"—" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-4 text-muted">No fallbacks in this window — Gemini has been reliable.</div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}

@@ -156,7 +156,6 @@ class CreateUserForm(forms.Form):
                 **_TEXT_INPUT,
                 "placeholder": "Mailbox app password",
             },
-            render_value=True,
         ),
     )
     role = forms.ChoiceField(
@@ -213,9 +212,8 @@ class EditUserForm(forms.Form):
         widget=forms.PasswordInput(
             attrs={
                 **_TEXT_INPUT,
-                "placeholder": "Leave unchanged if not updating",
+                "placeholder": "Leave blank to keep the current password",
             },
-            render_value=True,
         ),
     )
     role = forms.ChoiceField(
@@ -255,8 +253,7 @@ class MailboxSettingsForm(forms.Form):
         widget=forms.PasswordInput(
             attrs={
                 **_TEXT_INPUT,
-                "placeholder": "Mailbox app password",
+                "placeholder": "Leave blank to keep the current password",
             },
-            render_value=True,
         ),
     )
