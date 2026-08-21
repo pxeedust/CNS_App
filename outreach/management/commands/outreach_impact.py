@@ -144,6 +144,12 @@ class Command(BaseCommand):
             default="apollo_contacts.csv",
             help="Contact CSV used to compute research-cache savings on real data.",
         )
+        parser.add_argument(
+            "--emails",
+            type=int,
+            default=10,
+            help="How many contacts to show in the side-by-side campaign (default 10).",
+        )
 
     # -- helpers ------------------------------------------------------------
 
@@ -234,8 +240,95 @@ class Command(BaseCommand):
             severity = "blocker" if code in _BLOCKER_CODES else "warning"
             self.stdout.write(f"  {code:<28}{severity:<10}x{count}")
 
+    def _section_side_by_side(self, csv_path, count):
+        """
+        Run the same batch of contacts through both systems and show what
+        actually lands in each prospect's inbox. Real company names from the
+        contact CSV, so the output reads like a real send.
+        """
+        self._h1(f"2. SIDE BY SIDE — {count} contacts, same Gemini replies, both systems")
+
+        companies = _load_companies(csv_path) or [f"Company {i+1}" for i in range(count)]
+        companies = (companies * count)[:count]
+
+        # Cycle the corpus so the batch has a realistic mix of good and bad
+        # replies. The clean draft is index 0; the rest are the failure modes.
+        drafts = [CORPUS[i % len(CORPUS)] for i in range(count)]
+
+        self.stdout.write(
+            "Both columns receive the identical Gemini reply for each contact.\n"
+            "The only difference is what each system does with it.\n"
+        )
+        self.stdout.write(
+            self.style.WARNING(
+                "NOTE: this demo batch deliberately contains one of EVERY known\n"
+                "failure mode so you can see each one. It is NOT a real-world\n"
+                "failure rate — do not quote the ratio below as one. The true rate\n"
+                "for your data is whatever /reliability/ reports after a live run.\n"
+            )
+        )
+        header = f"{'#':<3}{'company':<26}{'OLD system delivers':<26}{'NEW system delivers':<26}"
+        self.stdout.write(self.style.HTTP_INFO(header))
+        self.stdout.write("-" * 81)
+
+        old_bad = new_bad = 0
+        old_generic = new_generic = 0
+
+        for i, (company, (label, subject, body)) in enumerate(zip(companies, drafts), 1):
+            context = dict(_CONTEXT, company="Acme Corp")
+
+            o_subject, o_body, _p = ai_client.validate_and_clean(
+                subject, body, subject_prefix="180DC"
+            )
+            report = quality.check_email(o_subject, o_body, **context)
+
+            # OLD: only a completely empty body was ever rejected.
+            if not o_body:
+                old_cell, old_style = "generic template", self.style.WARNING
+                old_generic += 1
+            elif not report.passed:
+                old_cell, old_style = "BROKEN EMAIL SENT", self.style.ERROR
+                old_bad += 1
+            else:
+                old_cell, old_style = "good personal email", self.style.SUCCESS
+
+            # NEW: worst case shown — the repair attempt is assumed to fail, so
+            # a defective draft always ends up as the safe generic template.
+            if not report.passed:
+                new_cell, new_style = "generic template", self.style.WARNING
+                new_generic += 1
+            else:
+                new_cell, new_style = "good personal email", self.style.SUCCESS
+
+            self.stdout.write(
+                f"{i:<3}{company[:24]:<26}"
+                + old_style(f"{old_cell:<26}")
+                + new_style(f"{new_cell:<26}")
+            )
+
+        self._h2("What the prospects received (from THIS demo batch)")
+        self.stdout.write(
+            self.style.ERROR(
+                f"  OLD system : {old_bad} of {count} defective email(s) delivered "
+                f"to the prospect"
+            )
+        )
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"  NEW system : {new_bad} of {count} defective email(s) delivered "
+                f"to the prospect"
+            )
+        )
+        self.stdout.write(
+            f"\n  The {new_generic} draft(s) the new system rejected were replaced by the "
+            f"plain\n  template — still a professional email, just not personalised. "
+            f"That is\n  the WORST case shown here: this run assumes the retry never "
+            f"works. With\n  a live API key some of those come back fixed and personalised "
+            f"instead."
+        )
+
     def _section_repair(self):
-        self._h1("2. SELF-REPAIR — what happens to a rejected draft")
+        self._h1("3. SELF-REPAIR — what happens to a rejected draft")
         self.stdout.write(
             "A rejected draft is not thrown away. The model is sent its own draft\n"
             "plus the itemised defects and asked to fix them. Shown here with a\n"
@@ -269,21 +362,14 @@ class Command(BaseCommand):
         )
 
     def _section_cache(self, csv_path):
-        self._h1("3. RESEARCH CACHE — grounded search calls avoided")
+        self._h1("4. RESEARCH CACHE — grounded search calls avoided")
         self.stdout.write(
             "Every email is preceded by a Google-Search-grounded Gemini call to\n"
             "research the company. That call was previously made once per CONTACT.\n"
             "It is now cached per COMPANY.\n"
         )
 
-        rows = []
-        if os.path.exists(csv_path):
-            with open(csv_path, encoding="utf-8-sig") as fh:
-                rows = [r for r in csv.DictReader(fh)]
-        companies = [
-            (r.get("Company Name") or "").strip() for r in rows
-        ]
-        companies = [c for c in companies if c]
+        companies = _load_companies(csv_path)
 
         # The DB is optional here — this command is useful before `migrate` has
         # ever run, so an unmigrated database degrades to the CSV figures only.
@@ -338,7 +424,7 @@ class Command(BaseCommand):
         )
 
     def _section_telemetry(self):
-        self._h1("4. TELEMETRY — what is recorded now that was not before")
+        self._h1("5. TELEMETRY — what is recorded now that was not before")
         rows = [
             ("quality_score", "0-100 content score of the email actually sent"),
             ("quality_issues", "every defect found, with severity"),
@@ -358,6 +444,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         self._section_gate()
+        self._section_side_by_side(options["csv"], options["emails"])
         self._section_repair()
         self._section_cache(options["csv"])
         self._section_telemetry()
@@ -380,3 +467,12 @@ def _norm(name):
     from outreach.models import CompanyResearch
 
     return CompanyResearch.make_key(name)
+
+
+def _load_companies(csv_path):
+    """Company names from the contact CSV; [] when the file isn't there."""
+    if not os.path.exists(csv_path):
+        return []
+    with open(csv_path, encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    return [c for c in ((r.get("Company Name") or "").strip() for r in rows) if c]
