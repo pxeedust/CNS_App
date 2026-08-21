@@ -26,6 +26,7 @@ from .models import (
     ActionLog,
     CampaignRun,
     Client,
+    CompanyResearch,
     EmailReply,
     FollowupRun,
     LinkedInReachout,
@@ -897,6 +898,46 @@ def reliability_dashboard(request):
         .order_by("-emailed_at")[:25]
     )
 
+    # -- Content quality (as opposed to delivery reliability) ---------------
+    # An email can be delivered perfectly and still be unsendable garbage —
+    # e.g. one that reached the prospect reading "[Company]'s work in
+    # [specific domain]". These figures cover that second failure mode.
+    scored_logs = action_logs.filter(quality_score__isnull=False)
+    scored_count = scored_logs.count()
+    avg_quality_score = (
+        round(
+            sum(scored_logs.values_list("quality_score", flat=True)) / scored_count, 1
+        )
+        if scored_count
+        else None
+    )
+    repaired_count = action_logs.filter(was_repaired=True).count()
+    quality_blocked_count = action_logs.filter(
+        ai_failure_reason__startswith="quality_gate_failed"
+    ).count()
+    # Every one of these is an email that, before the quality gate existed,
+    # would have been sent to a real prospect with visible defects.
+    emails_saved = repaired_count + quality_blocked_count
+
+    ai_logs = action_logs.filter(ai_used=True)
+    ai_count = ai_logs.count()
+    grounded_count = ai_logs.filter(research_grounded=True).count()
+    grounded_rate = round(grounded_count / ai_count * 100, 1) if ai_count else None
+
+    recent_quality_events = (
+        action_logs.filter(Q(was_repaired=True) | Q(quality_score__lt=100))
+        .exclude(quality_score__isnull=True)
+        .select_related("client")
+        .order_by("-emailed_at")[:25]
+    )
+
+    research_entries = CompanyResearch.objects.all()
+    research_total = research_entries.count()
+    research_reuses = sum(research_entries.values_list("hit_count", flat=True))
+    research_ungrounded = research_entries.filter(grounded=False).count()
+    # Without the cache, each reuse would have been another grounded search.
+    search_calls_saved = research_reuses
+
     def _run_rows(queryset, label):
         rows = []
         for run in queryset.order_by("-started_at")[:10]:
@@ -912,6 +953,10 @@ def reliability_dashboard(request):
                     "failed": run.failed,
                     "ai_fallback_rate": run.ai_fallback_rate,
                     "smtp_failure_rate": run.smtp_failure_rate,
+                    "avg_quality_score": run.avg_quality_score,
+                    "repaired_count": run.repaired_count,
+                    "quality_blocked_count": run.quality_blocked_count,
+                    "research_grounded_rate": run.research_grounded_rate,
                 }
             )
         return rows
@@ -940,5 +985,20 @@ def reliability_dashboard(request):
             "recent_fallbacks": recent_fallbacks,
             "run_rows": run_rows[:20],
             "stuck_clients": stuck_clients,
+            # Content quality
+            "avg_quality_score": avg_quality_score,
+            "scored_count": scored_count,
+            "repaired_count": repaired_count,
+            "quality_blocked_count": quality_blocked_count,
+            "emails_saved": emails_saved,
+            "recent_quality_events": recent_quality_events,
+            # Research grounding + cache
+            "grounded_rate": grounded_rate,
+            "grounded_count": grounded_count,
+            "ai_count": ai_count,
+            "research_total": research_total,
+            "research_reuses": research_reuses,
+            "research_ungrounded": research_ungrounded,
+            "search_calls_saved": search_calls_saved,
         },
     )

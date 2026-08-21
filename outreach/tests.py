@@ -8,11 +8,12 @@ from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from . import ai_client
+from . import ai_client, quality
 from .models import (
     ActionLog,
     CampaignRun,
     Client,
+    CompanyResearch,
     FollowupRun,
     LinkedInReachout,
     ScanRun,
@@ -21,11 +22,53 @@ from .models import (
 from .tasks import (
     _claim_client,
     _generate_ai_email,
+    _get_company_research,
     _release_client,
     _send_single_email,
     scan_inbox_for_replies,
     send_automated_pings,
     send_followups,
+)
+
+# A realistic, sendable draft: names the company, addresses the contact,
+# carries the full signature, no leftover scaffolding. Used as the "clean"
+# fixture so quality-gate tests contrast against a genuine good email.
+GOOD_EMAIL_BODY = (
+    "Respected Mr Lee,\n\n"
+    "I am Asha Rao, Outreach Lead at 180 Degrees Consulting, IIT Kharagpur — a "
+    "student-run consultancy providing strategic and operational services to "
+    "organisations aiming for greater impact. We have followed Acme Corp's work "
+    "in workflow automation closely, particularly your recent expansion of the "
+    "self-serve onboarding product across mid-market accounts.\n\n"
+    "At 180DC IIT Kharagpur we have partnered with the CRY Foundation and Robin "
+    "Hood Army on operational strategy and program scalability. We believe our "
+    "data-driven consulting could help Acme Corp refine its go-to-market motion "
+    "and reduce onboarding friction. We would welcome a brief conversation to "
+    "explore this.\n\n"
+    "Best regards,\n"
+    "Asha Rao\n"
+    "Outreach Lead\n"
+    "180 Degrees Consulting, IIT Kharagpur\n"
+    "https://www.180dc.org/branches/IITKGP\n"
+)
+
+# The exact failure this gate exists for: Gemini copies the sample email's
+# bracketed scaffolding verbatim when the grounded-research pass came back
+# empty. This body is structurally valid JSON output and passes every check
+# that existed before the gate.
+PLACEHOLDER_EMAIL_BODY = (
+    "Respected Mr Lee,\n\n"
+    "I am Asha Rao, Outreach Lead at 180 Degrees Consulting, IIT Kharagpur — a "
+    "student-run consultancy providing strategic and operational services. We "
+    "have been impressed by [Company]'s work in [specific domain], particularly "
+    "[specific achievement/product]. [1-2 sentences referencing concrete recent "
+    "news, financials, or product milestones from the Google search results].\n\n"
+    "We believe our data-driven consulting could support [Company] in [specific "
+    "area relevant to them]. We would welcome a brief conversation.\n\n"
+    "Best regards,\n"
+    "Asha Rao\n"
+    "Outreach Lead\n"
+    "180 Degrees Consulting, IIT Kharagpur\n"
 )
 
 
@@ -385,7 +428,7 @@ class GeminiEmailGenerationTests(TestCase):
     def test_successful_generation_marks_ai_used(self, _mock_research, mock_generate_json):
         mock_generate_json.return_value = {
             "subject": "180DC IIT Kharagpur X Acme Corp",
-            "body": "Respected Sir,\n\nThis is a genuinely personalised email body. " * 3,
+            "body": GOOD_EMAIL_BODY,
         }
 
         subject, body, meta = _generate_ai_email(self.client_record, self.sender_profile)
@@ -393,7 +436,11 @@ class GeminiEmailGenerationTests(TestCase):
         self.assertTrue(meta["ai_used"])
         self.assertIsNone(meta["fallback_reason"])
         self.assertEqual(subject, "180DC IIT Kharagpur X Acme Corp")
-        self.assertIn("personalised", body)
+        self.assertIn("Acme Corp", body)
+        # A clean draft must pass the gate first time — no repair call, full score.
+        self.assertEqual(meta["quality_score"], 100)
+        self.assertFalse(meta["was_repaired"])
+        self.assertEqual(mock_generate_json.call_count, 1)
 
     @override_settings(GOOGLE_API_KEY="test-key")
     @patch("outreach.ai_client.generate_json")
@@ -670,3 +717,487 @@ class CeleryTaskExecutionTests(TestCase):
         self.assertEqual(run.status, ScanRun.RunStatus.COMPLETED)
         self.assertEqual(run.total, 3)
         self.assertEqual(run.sent, 1)
+
+
+# ---------------------------------------------------------------------------
+# Content quality gate
+# ---------------------------------------------------------------------------
+
+
+class QualityGateDetectorTests(TestCase):
+    """
+    Unit-level coverage of the deterministic checks in quality.py.
+
+    These are the defects that made it all the way to a prospect's inbox
+    before this gate existed, because validate_and_clean only ever looked at
+    length and markdown.
+    """
+
+    def _check(self, body, **kwargs):
+        kwargs.setdefault("company", "Acme Corp")
+        kwargs.setdefault("contact_person", "Jordan Lee")
+        kwargs.setdefault("sender_name", "Asha Rao")
+        return quality.check_email("180DC IIT Kharagpur X Acme Corp", body, **kwargs)
+
+    def test_clean_email_passes_with_full_score(self):
+        report = self._check(GOOD_EMAIL_BODY)
+        self.assertTrue(report.passed)
+        self.assertEqual(report.score, 100)
+        self.assertEqual(report.issues, [])
+
+    def test_unfilled_square_bracket_placeholder_is_a_blocker(self):
+        report = self._check(PLACEHOLDER_EMAIL_BODY)
+        self.assertFalse(report.passed)
+        self.assertIn("unfilled_placeholder", report.codes)
+        self.assertLess(report.score, 60)
+
+    def test_placeholder_detail_lists_the_offending_slots(self):
+        report = self._check(PLACEHOLDER_EMAIL_BODY)
+        issue = next(i for i in report.issues if i.code == "unfilled_placeholder")
+        self.assertIn("[Company]", issue.detail)
+
+    def test_angle_bracket_placeholder_is_a_blocker(self):
+        body = GOOD_EMAIL_BODY.replace("Acme Corp's", "<company name>'s")
+        report = self._check(body)
+        self.assertFalse(report.passed)
+        self.assertIn("unfilled_placeholder", report.codes)
+
+    def test_template_token_leak_is_a_blocker(self):
+        body = GOOD_EMAIL_BODY.replace("Mr Lee", "{{first_name}}")
+        report = self._check(body)
+        self.assertFalse(report.passed)
+        self.assertIn("template_token_leak", report.codes)
+
+    def test_assistant_commentary_is_a_blocker(self):
+        body = "Here is the email you requested:\n\n" + GOOD_EMAIL_BODY
+        report = self._check(body)
+        self.assertFalse(report.passed)
+        self.assertIn("ai_meta_commentary", report.codes)
+
+    def test_body_that_never_names_the_company_is_a_blocker(self):
+        body = GOOD_EMAIL_BODY.replace("Acme Corp", "your organisation")
+        report = self._check(body)
+        self.assertFalse(report.passed)
+        self.assertIn("missing_company", report.codes)
+
+    def test_missing_signature_is_a_blocker(self):
+        body = GOOD_EMAIL_BODY.replace("Asha Rao", "")
+        report = self._check(body)
+        self.assertFalse(report.passed)
+        self.assertIn("missing_signature", report.codes)
+
+    def test_truncated_body_is_a_blocker(self):
+        report = self._check("Respected Mr Lee,\n\nAsha Rao, Acme Corp.")
+        self.assertFalse(report.passed)
+        self.assertIn("body_too_short", report.codes)
+
+    def test_empty_body_scores_zero(self):
+        report = self._check("")
+        self.assertFalse(report.passed)
+        self.assertEqual(report.score, 0)
+        self.assertIn("empty_body", report.codes)
+
+    def test_wrong_recipient_is_a_warning_not_a_blocker(self):
+        body = GOOD_EMAIL_BODY.replace("Respected Mr Lee,", "Respected Mr Sharma,")
+        report = self._check(body)
+        self.assertIn("wrong_recipient", report.codes)
+        self.assertTrue(report.passed)  # worth flagging, not worth blocking
+
+    def test_generic_salutation_does_not_trip_wrong_recipient(self):
+        body = GOOD_EMAIL_BODY.replace("Respected Mr Lee,", "Respected Sir,")
+        report = self._check(body)
+        self.assertNotIn("wrong_recipient", report.codes)
+
+    def test_generic_company_name_skips_the_company_check(self):
+        """
+        A name made entirely of generic words ("Tech Solutions") yields no
+        distinctive token, so the check is skipped rather than raising a
+        blocker it cannot substantiate.
+        """
+        report = self._check(GOOD_EMAIL_BODY, company="Tech Solutions Ltd")
+        self.assertNotIn("missing_company", report.codes)
+
+    def test_corporate_suffixes_do_not_break_company_matching(self):
+        report = self._check(GOOD_EMAIL_BODY, company="Acme Corp Pvt Ltd")
+        self.assertNotIn("missing_company", report.codes)
+
+    def test_subject_placeholder_is_detected(self):
+        report = quality.check_email(
+            "180DC IIT Kharagpur X [Company]",
+            GOOD_EMAIL_BODY,
+            company="Acme Corp",
+            sender_name="Asha Rao",
+        )
+        self.assertFalse(report.passed)
+        self.assertIn("unfilled_placeholder", report.codes)
+
+    def test_repair_instructions_name_every_defect(self):
+        report = self._check(PLACEHOLDER_EMAIL_BODY)
+        instructions = report.repair_instructions()
+        for code in report.codes:
+            self.assertIn(code, instructions)
+
+    def test_current_validate_and_clean_alone_would_not_catch_this(self):
+        """
+        Regression guard documenting *why* this module exists: the pre-existing
+        validator reports no problems for the placeholder email, which is
+        exactly how it reached real prospects.
+        """
+        _s, _b, problems = ai_client.validate_and_clean(
+            "180DC IIT Kharagpur X Acme Corp",
+            PLACEHOLDER_EMAIL_BODY,
+            subject_prefix="180DC",
+        )
+        self.assertEqual(problems, [])
+        self.assertFalse(self._check(PLACEHOLDER_EMAIL_BODY).passed)
+
+
+class QualityGateRepairTests(TestCase):
+    """The self-correction pass: reject, feed the defects back, re-check."""
+
+    def setUp(self):
+        self.context = {
+            "company": "Acme Corp",
+            "contact_person": "Jordan Lee",
+            "sender_name": "Asha Rao",
+            "subject_prefix": "180DC",
+        }
+
+    @patch("outreach.ai_client.generate_json")
+    def test_clean_draft_makes_no_repair_call(self, mock_generate_json):
+        mock_generate_json.return_value = {
+            "subject": "180DC IIT Kharagpur X Acme Corp",
+            "body": GOOD_EMAIL_BODY,
+        }
+
+        _s, _b, report, meta = ai_client.generate_checked_email(
+            api_key="k", model_name="m", prompt="p", quality_context=self.context
+        )
+
+        self.assertTrue(report.passed)
+        self.assertEqual(meta["attempts"], 1)
+        self.assertFalse(meta["repaired"])
+        self.assertEqual(mock_generate_json.call_count, 1)
+
+    @patch("outreach.ai_client.generate_json")
+    def test_bad_draft_is_repaired_on_the_second_attempt(self, mock_generate_json):
+        mock_generate_json.side_effect = [
+            {"subject": "180DC IIT Kharagpur X Acme Corp", "body": PLACEHOLDER_EMAIL_BODY},
+            {"subject": "180DC IIT Kharagpur X Acme Corp", "body": GOOD_EMAIL_BODY},
+        ]
+
+        _s, body, report, meta = ai_client.generate_checked_email(
+            api_key="k", model_name="m", prompt="p", quality_context=self.context
+        )
+
+        self.assertTrue(report.passed)
+        self.assertTrue(meta["repaired"])
+        self.assertEqual(meta["attempts"], 2)
+        self.assertNotIn("[Company]", body)
+
+    @patch("outreach.ai_client.generate_json")
+    def test_repair_prompt_carries_the_defects_and_the_rejected_draft(
+        self, mock_generate_json
+    ):
+        mock_generate_json.side_effect = [
+            {"subject": "180DC IIT Kharagpur X Acme Corp", "body": PLACEHOLDER_EMAIL_BODY},
+            {"subject": "180DC IIT Kharagpur X Acme Corp", "body": GOOD_EMAIL_BODY},
+        ]
+
+        ai_client.generate_checked_email(
+            api_key="k", model_name="m", prompt="ORIGINAL-PROMPT", quality_context=self.context
+        )
+
+        repair_prompt = mock_generate_json.call_args_list[1].kwargs["prompt"]
+        self.assertIn("ORIGINAL-PROMPT", repair_prompt)          # original task kept
+        self.assertIn("unfilled_placeholder", repair_prompt)     # the itemised defect
+        self.assertIn("[Company]", repair_prompt)                # the rejected draft
+        self.assertIn("REJECTED", repair_prompt)
+
+    @patch("outreach.ai_client.generate_json")
+    def test_persistently_bad_draft_fails_the_gate(self, mock_generate_json):
+        mock_generate_json.return_value = {
+            "subject": "180DC IIT Kharagpur X Acme Corp",
+            "body": PLACEHOLDER_EMAIL_BODY,
+        }
+
+        _s, _b, report, meta = ai_client.generate_checked_email(
+            api_key="k", model_name="m", prompt="p", quality_context=self.context
+        )
+
+        self.assertFalse(report.passed)
+        self.assertFalse(meta["gate_passed"])
+        self.assertEqual(meta["attempts"], 2)
+
+    @patch("outreach.ai_client.generate_json")
+    def test_repair_can_be_disabled(self, mock_generate_json):
+        mock_generate_json.return_value = {
+            "subject": "180DC IIT Kharagpur X Acme Corp",
+            "body": PLACEHOLDER_EMAIL_BODY,
+        }
+
+        _s, _b, _r, meta = ai_client.generate_checked_email(
+            api_key="k",
+            model_name="m",
+            prompt="p",
+            quality_context=self.context,
+            max_repair_attempts=0,
+        )
+
+        self.assertEqual(meta["attempts"], 1)
+        self.assertFalse(meta["gate_passed"])
+
+
+class QualityGateIntegrationTests(TestCase):
+    """The gate as wired into the real generation path in tasks.py."""
+
+    def setUp(self):
+        self.sender_profile = {
+            "sender_name": "Asha Rao",
+            "sender_role": "Outreach Lead",
+            "mailbox_email": "asha.mail@test.com",
+        }
+        self.client_record = Client.objects.create(
+            company_name="Acme Corp",
+            contact_person="Jordan Lee",
+            email="jordan@acme.test",
+            industry="SaaS",
+        )
+
+    @override_settings(GOOGLE_API_KEY="test-key")
+    @patch("outreach.ai_client.generate_json")
+    @patch("outreach.tasks._google_search_snippets", return_value="Acme Corp builds tools.")
+    def test_placeholder_email_never_reaches_the_recipient(
+        self, _mock_research, mock_generate_json
+    ):
+        """
+        The headline behaviour change: an email full of '[Company]' scaffolding
+        used to be sent verbatim and logged as an AI success. It must now be
+        replaced by the safe template and recorded as a quality failure.
+        """
+        mock_generate_json.return_value = {
+            "subject": "180DC IIT Kharagpur X Acme Corp",
+            "body": PLACEHOLDER_EMAIL_BODY,
+        }
+
+        subject, body, meta = _generate_ai_email(self.client_record, self.sender_profile)
+
+        self.assertNotIn("[Company]", body)
+        self.assertNotIn("[specific domain]", body)
+        self.assertFalse(meta["ai_used"])
+        self.assertTrue(meta["quality_blocked"])
+        self.assertIn("quality_gate_failed", meta["fallback_reason"])
+        self.assertIn("unfilled_placeholder", meta["fallback_reason"])
+        self.assertIn("Acme Corp", subject)
+
+    @override_settings(GOOGLE_API_KEY="test-key")
+    @patch("outreach.ai_client.generate_json")
+    @patch("outreach.tasks._google_search_snippets", return_value="Acme Corp builds tools.")
+    def test_repaired_email_is_sent_and_flagged_as_repaired(
+        self, _mock_research, mock_generate_json
+    ):
+        mock_generate_json.side_effect = [
+            {"subject": "180DC IIT Kharagpur X Acme Corp", "body": PLACEHOLDER_EMAIL_BODY},
+            {"subject": "180DC IIT Kharagpur X Acme Corp", "body": GOOD_EMAIL_BODY},
+        ]
+
+        _subject, body, meta = _generate_ai_email(self.client_record, self.sender_profile)
+
+        self.assertTrue(meta["ai_used"])
+        self.assertTrue(meta["was_repaired"])
+        self.assertNotIn("[Company]", body)
+        self.assertEqual(meta["quality_score"], 100)
+        self.assertEqual(meta["ai_calls"], 2)
+
+    @override_settings(GOOGLE_API_KEY="test-key")
+    @patch("outreach.ai_client.generate_json")
+    @patch("outreach.tasks._google_search_snippets", return_value="Acme Corp builds tools.")
+    def test_campaign_run_records_quality_telemetry(
+        self, _mock_research, mock_generate_json
+    ):
+        mock_generate_json.return_value = {
+            "subject": "180DC IIT Kharagpur X Acme Corp",
+            "body": PLACEHOLDER_EMAIL_BODY,
+        }
+        user = User.objects.create_user("qa-user", "qa@test.com", "pw")
+        TeamMember.objects.create(
+            user=user, mailbox_email="qa@test.com", mailbox_app_password="pw"
+        )
+        run = CampaignRun.objects.create()
+
+        with patch("outreach.tasks._smtp_preflight", return_value=(True, "ok")), patch(
+            "outreach.tasks._open_smtp_connection"
+        ), patch("outreach.tasks._send_single_email", return_value=(True, "Sent")):
+            send_automated_pings(triggered_by_user_id=user.pk, run_id=run.pk)
+
+        run.refresh_from_db()
+        entry = run.log[0]
+        self.assertTrue(entry["quality_blocked"])
+        self.assertFalse(entry["ai_used"])
+        self.assertEqual(run.quality_blocked_count, 1)
+
+        log = ActionLog.objects.get()
+        self.assertFalse(log.ai_used)
+        self.assertIn("quality_gate_failed", log.ai_failure_reason)
+        self.assertTrue(
+            any(i["code"] == "unfilled_placeholder" for i in log.quality_issues)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Research cache
+# ---------------------------------------------------------------------------
+
+
+class ResearchCacheTests(TestCase):
+    """
+    The grounding pass used to run once per *contact*. Caching it per company
+    is what turns N contacts at one company into a single grounded search.
+    """
+
+    @patch("outreach.tasks._google_search_snippets", return_value="Acme builds widgets.")
+    def test_second_contact_at_same_company_reuses_the_cached_research(self, mock_search):
+        first = _get_company_research("k", "m", "Acme Corp", "SaaS", "")
+        second = _get_company_research("k", "m", "Acme Corp", "SaaS", "")
+
+        self.assertEqual(mock_search.call_count, 1)  # not 2
+        self.assertEqual(first[0], second[0])
+        self.assertFalse(first[2])  # first was a miss
+        self.assertTrue(second[2])  # second was a hit
+
+    @patch("outreach.tasks._google_search_snippets", return_value="Acme builds widgets.")
+    def test_cache_key_is_insensitive_to_case_and_punctuation(self, mock_search):
+        _get_company_research("k", "m", "Acme Corp.", "SaaS", "")
+        _get_company_research("k", "m", "ACME  CORP", "SaaS", "")
+
+        self.assertEqual(mock_search.call_count, 1)
+        self.assertEqual(CompanyResearch.objects.count(), 1)
+
+    @patch("outreach.tasks._google_search_snippets", return_value="Acme builds widgets.")
+    def test_hit_count_tracks_calls_avoided(self, _mock_search):
+        for _ in range(4):
+            _get_company_research("k", "m", "Acme Corp", "SaaS", "")
+
+        entry = CompanyResearch.objects.get()
+        self.assertEqual(entry.hit_count, 3)  # 1 miss + 3 reuses
+        self.assertTrue(entry.grounded)
+
+    @patch("outreach.tasks._google_search_snippets", return_value="Acme builds widgets.")
+    def test_stale_entry_is_refreshed(self, mock_search):
+        _get_company_research("k", "m", "Acme Corp", "SaaS", "")
+        CompanyResearch.objects.update(
+            refreshed_at=timezone.now() - timedelta(days=400)
+        )
+
+        _get_company_research("k", "m", "Acme Corp", "SaaS", "")
+        self.assertEqual(mock_search.call_count, 2)
+
+    @patch("outreach.tasks._google_search_snippets", return_value="")
+    def test_empty_research_is_recorded_as_ungrounded(self, _mock_search):
+        summary, grounded, _hit = _get_company_research("k", "m", "Acme Corp", "SaaS", "")
+
+        self.assertEqual(summary, "")
+        self.assertFalse(grounded)
+        self.assertFalse(CompanyResearch.objects.get().grounded)
+
+    @patch("outreach.tasks._google_search_snippets", return_value="")
+    def test_empty_research_is_retried_sooner_than_a_successful_one(self, mock_search):
+        """
+        An empty result is usually transient; reusing it for 30 days would lock
+        a company into permanently generic emails.
+        """
+        _get_company_research("k", "m", "Acme Corp", "SaaS", "")
+        CompanyResearch.objects.update(
+            refreshed_at=timezone.now() - timedelta(hours=12)
+        )
+
+        _get_company_research("k", "m", "Acme Corp", "SaaS", "")
+        self.assertEqual(mock_search.call_count, 2)
+
+    @patch("outreach.tasks._google_search_snippets", return_value="Acme builds widgets.")
+    def test_different_companies_are_cached_separately(self, mock_search):
+        _get_company_research("k", "m", "Acme Corp", "SaaS", "")
+        _get_company_research("k", "m", "Globex Inc", "SaaS", "")
+
+        self.assertEqual(mock_search.call_count, 2)
+        self.assertEqual(CompanyResearch.objects.count(), 2)
+
+
+class RunQualityStatsTests(TestCase):
+    """Aggregate stats the reliability dashboard reads off a run's log."""
+
+    def test_stats_summarise_a_mixed_run(self):
+        run = CampaignRun.objects.create(
+            log=[
+                {"status": "sent", "ai_used": True, "quality_score": 100,
+                 "was_repaired": False, "research_grounded": True},
+                {"status": "sent", "ai_used": True, "quality_score": 90,
+                 "was_repaired": True, "research_grounded": True},
+                {"status": "sent", "ai_used": False, "quality_score": 20,
+                 "quality_blocked": True, "research_grounded": False},
+                {"status": "failed", "detail": "smtp boom"},
+            ]
+        )
+
+        self.assertEqual(run.avg_quality_score, 70.0)
+        self.assertEqual(run.repaired_count, 1)
+        self.assertEqual(run.quality_blocked_count, 1)
+        self.assertEqual(run.research_grounded_rate, 66.7)
+        self.assertEqual(run.ai_fallback_rate, 33.3)
+        self.assertEqual(run.smtp_failure_rate, 25.0)
+
+    def test_stats_are_none_on_an_empty_run(self):
+        run = CampaignRun.objects.create(log=[])
+        self.assertIsNone(run.avg_quality_score)
+        self.assertIsNone(run.research_grounded_rate)
+        self.assertEqual(run.repaired_count, 0)
+
+
+class ReliabilityDashboardTests(TestCase):
+    """The dashboard must surface content quality, not just delivery."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user("admin-user", "admin@test.com", "pw")
+        TeamMember.objects.create(user=self.admin, role=TeamMember.Role.ADMIN)
+        self.client_record = Client.objects.create(
+            company_name="Acme Corp",
+            contact_person="Jordan Lee",
+            email="jordan@acme.test",
+            industry="SaaS",
+        )
+
+    def test_dashboard_reports_blocked_and_repaired_counts(self):
+        ActionLog.objects.create(
+            client=self.client_record, team_member=self.admin, ai_used=False,
+            ai_failure_reason="quality_gate_failed: unfilled_placeholder",
+            quality_score=25,
+            quality_issues=[{"code": "unfilled_placeholder", "severity": "blocker",
+                             "detail": "x"}],
+        )
+        ActionLog.objects.create(
+            client=self.client_record, team_member=self.admin, ai_used=True,
+            quality_score=100, was_repaired=True, research_grounded=True,
+        )
+        CompanyResearch.objects.create(
+            company_key="acme corp", company_name="Acme Corp",
+            summary="s", grounded=True, hit_count=7,
+        )
+
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("outreach:reliability_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        ctx = response.context
+        self.assertEqual(ctx["quality_blocked_count"], 1)
+        self.assertEqual(ctx["repaired_count"], 1)
+        self.assertEqual(ctx["emails_saved"], 2)
+        self.assertEqual(ctx["avg_quality_score"], 62.5)
+        self.assertEqual(ctx["search_calls_saved"], 7)
+
+    def test_non_admin_is_redirected(self):
+        member = User.objects.create_user("plain-user", "m@test.com", "pw")
+        TeamMember.objects.create(user=member, role=TeamMember.Role.MEMBER)
+        self.client.force_login(member)
+
+        response = self.client.get(reverse("outreach:reliability_dashboard"))
+        self.assertEqual(response.status_code, 302)

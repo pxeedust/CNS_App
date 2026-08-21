@@ -118,6 +118,24 @@ class ActionLog(models.Model):
     email_body = models.TextField(
         blank=True, help_text="Full body of the email actually sent, for audit/debugging."
     )
+    quality_score = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="0-100 content-quality score of the email that was sent (see quality.py).",
+    )
+    quality_issues = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Content-quality defects detected in the sent email.",
+    )
+    was_repaired = models.BooleanField(
+        default=False,
+        help_text="The first AI draft failed the quality gate and a repair pass fixed it.",
+    )
+    research_grounded = models.BooleanField(
+        default=False,
+        help_text="A live Google-Search research summary was available when this email was written.",
+    )
     emailed_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -130,6 +148,57 @@ class ActionLog(models.Model):
             else "Unknown"
         )
         return f"{team_member_name} → {self.client.company_name} on {self.emailed_at:%Y-%m-%d %H:%M}"
+
+
+class CompanyResearch(models.Model):
+    """
+    Cached Google-Search-grounded research summary for one company.
+
+    The grounding pass was previously re-run for every *contact*, so a batch
+    of 50 contacts spread across 20 companies made 50 grounded search calls
+    instead of 20, paid for again on every re-run, and added its full latency
+    to each send. Research about a company is stable over days, so it is
+    cached here keyed on the normalised company name and reused until it
+    ages past RESEARCH_CACHE_TTL_DAYS.
+
+    `grounded` records whether the search actually returned content. That
+    distinction was previously invisible: a failed grounding pass is swallowed
+    and rendered into the prompt as "No results available", after which Gemini
+    writes a generic email that is still logged as ai_used=True.
+    """
+
+    company_key = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+        help_text="Normalised company name used as the cache key.",
+    )
+    company_name = models.CharField(max_length=255)
+    summary = models.TextField(blank=True)
+    grounded = models.BooleanField(
+        default=False,
+        help_text="False when the search returned nothing — the email will be generic.",
+    )
+    hit_count = models.PositiveIntegerField(
+        default=0, help_text="Times this cached entry was reused instead of re-searching."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    refreshed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["company_name"]
+        verbose_name_plural = "Company research"
+
+    def __str__(self):
+        state = "grounded" if self.grounded else "ungrounded"
+        return f"{self.company_name} ({state}, {self.hit_count} reuse(s))"
+
+    @staticmethod
+    def make_key(company_name: str) -> str:
+        """Normalise a company name into a stable cache key."""
+        import re as _re
+
+        return _re.sub(r"[^a-z0-9]+", " ", (company_name or "").lower()).strip()
 
 
 class RunStatus(models.TextChoices):
@@ -164,6 +233,40 @@ class RunLogStatsMixin:
             return None
         failed = sum(1 for e in entries if e.get("status") == "failed")
         return round(failed / len(entries) * 100, 1)
+
+    @property
+    def avg_quality_score(self):
+        """Mean content-quality score across the emails this run sent."""
+        scores = [
+            e["quality_score"]
+            for e in (self.log or [])
+            if e.get("status") == "sent" and isinstance(e.get("quality_score"), int)
+        ]
+        if not scores:
+            return None
+        return round(sum(scores) / len(scores), 1)
+
+    @property
+    def repaired_count(self):
+        """Drafts that failed the quality gate and were fixed by a repair pass."""
+        return sum(1 for e in (self.log or []) if e.get("was_repaired"))
+
+    @property
+    def quality_blocked_count(self):
+        """
+        Emails that would previously have gone out with unfilled placeholders
+        or other unsendable defects, and were replaced by the safe template.
+        """
+        return sum(1 for e in (self.log or []) if e.get("quality_blocked"))
+
+    @property
+    def research_grounded_rate(self):
+        """Share of sent emails written with a live research summary available."""
+        sent_entries = [e for e in (self.log or []) if e.get("status") == "sent"]
+        if not sent_entries:
+            return None
+        grounded = sum(1 for e in sent_entries if e.get("research_grounded"))
+        return round(grounded / len(sent_entries) * 100, 1)
 
 
 class CampaignRun(RunLogStatsMixin, models.Model):
