@@ -2,10 +2,13 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 
+from .fields import EncryptedCharField
+
 
 class Client(models.Model):
     class Status(models.TextChoices):
         NOT_CONTACTED = "Not Contacted", "Not Contacted"
+        SENDING = "Sending", "Sending"
         PINGED = "Pinged", "Pinged"
         REPLIED = "Replied", "Replied"
         FOLLOW_UP = "Follow Up", "Follow Up"
@@ -106,6 +109,15 @@ class ActionLog(models.Model):
         related_name="action_logs",
     )
     notes = models.TextField(blank=True)
+    ai_used = models.BooleanField(
+        default=False, help_text="Whether Gemini generated this email (False = static fallback template)."
+    )
+    ai_failure_reason = models.CharField(
+        max_length=255, blank=True, help_text="Why Gemini generation fell back, if it did."
+    )
+    email_body = models.TextField(
+        blank=True, help_text="Full body of the email actually sent, for audit/debugging."
+    )
     emailed_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -120,13 +132,44 @@ class ActionLog(models.Model):
         return f"{team_member_name} → {self.client.company_name} on {self.emailed_at:%Y-%m-%d %H:%M}"
 
 
-class CampaignRun(models.Model):
+class RunStatus(models.TextChoices):
+    RUNNING = "running", "Running"
+    COMPLETED = "completed", "Completed"
+    FAILED = "failed", "Failed"
+
+
+class RunLogStatsMixin:
+    """
+    Shared reliability-stat computations for any run model with a `log`
+    JSONField of per-recipient dicts (see send_automated_pings/send_followups
+    in tasks.py for the entry shape: status/ai_used/etc).
+
+    Deliberately a plain mixin (no model fields) so it can be added to the
+    pre-existing CampaignRun without an extra migration, while still being
+    shared with the new FollowupRun/ScanRun models below.
+    """
+
+    @property
+    def ai_fallback_rate(self):
+        sent_entries = [e for e in (self.log or []) if e.get("status") == "sent"]
+        if not sent_entries:
+            return None
+        fallback = sum(1 for e in sent_entries if not e.get("ai_used", True))
+        return round(fallback / len(sent_entries) * 100, 1)
+
+    @property
+    def smtp_failure_rate(self):
+        entries = self.log or []
+        if not entries:
+            return None
+        failed = sum(1 for e in entries if e.get("status") == "failed")
+        return round(failed / len(entries) * 100, 1)
+
+
+class CampaignRun(RunLogStatsMixin, models.Model):
     """Tracks the progress of a single outreach campaign run."""
 
-    class RunStatus(models.TextChoices):
-        RUNNING = "running", "Running"
-        COMPLETED = "completed", "Completed"
-        FAILED = "failed", "Failed"
+    RunStatus = RunStatus  # backwards-compatible alias (CampaignRun.RunStatus.X)
 
     status = models.CharField(
         max_length=20, choices=RunStatus.choices, default=RunStatus.RUNNING
@@ -148,6 +191,44 @@ class CampaignRun(models.Model):
 
     def __str__(self):
         return f"Run #{self.pk} — {self.status} ({self.processed}/{self.total})"
+
+
+class BaseRun(RunLogStatsMixin, models.Model):
+    """
+    Shared progress-tracking fields for background outreach tasks, used by
+    FollowupRun/ScanRun so they get the same live-progress-page treatment
+    CampaignRun already has, instead of running synchronously in a request.
+    """
+
+    RunStatus = RunStatus
+
+    status = models.CharField(
+        max_length=20, choices=RunStatus.choices, default=RunStatus.RUNNING
+    )
+    total = models.PositiveIntegerField(default=0)
+    processed = models.PositiveIntegerField(default=0)
+    sent = models.PositiveIntegerField(default=0)
+    failed = models.PositiveIntegerField(default=0)
+    current_company = models.CharField(max_length=255, blank=True)
+    current_step = models.CharField(max_length=50, blank=True)
+    log = models.JSONField(default=list, blank=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        abstract = True
+        ordering = ["-started_at"]
+
+    def __str__(self):
+        return f"{type(self).__name__} #{self.pk} — {self.status} ({self.processed}/{self.total})"
+
+
+class FollowupRun(BaseRun):
+    """Tracks the progress of a single send_followups run."""
+
+
+class ScanRun(BaseRun):
+    """Tracks the progress of a single scan_inbox_for_replies run."""
 
 
 class EmailReply(models.Model):
@@ -200,10 +281,10 @@ class TeamMember(models.Model):
         blank=True,
         help_text="Mailbox used for outbound email and IMAP reply scanning.",
     )
-    mailbox_app_password = models.CharField(
-        max_length=255,
+    mailbox_app_password = EncryptedCharField(
+        max_length=512,
         blank=True,
-        help_text="App password or mailbox password used for SMTP/IMAP.",
+        help_text="App password or mailbox password used for SMTP/IMAP (encrypted at rest).",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 

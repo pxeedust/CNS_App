@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 try:
@@ -193,6 +194,37 @@ IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
 FOLLOWUP_INTERVALS_DAYS = [3, 7, 14]  # days between each follow-up round
 MAX_FOLLOWUPS = 3
 
+# Username of the TeamMember whose mailbox unattended, Celery-Beat-triggered
+# follow-ups/reply-scans send/scan from (there's no interactive "triggering
+# user" for a scheduled run to resolve credentials from otherwise).
+AUTOMATED_SENDER_USERNAME = os.getenv("AUTOMATED_SENDER_USERNAME", "")
+
+# ---------------------------------------------------------------------------
+# Field-level encryption (TeamMember.mailbox_app_password at rest)
+# ---------------------------------------------------------------------------
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
+if not ENCRYPTION_KEY and not DEBUG:
+    raise ImproperlyConfigured(
+        "ENCRYPTION_KEY must be set in production — generate one with: "
+        "python -c \"from cryptography.fernet import Fernet; "
+        "print(Fernet.generate_key().decode())\""
+    )
+
+# ---------------------------------------------------------------------------
+# Error tracking (optional, free tier — no-op unless SENTRY_DSN is set)
+# ---------------------------------------------------------------------------
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.celery import CeleryIntegration
+    from sentry_sdk.integrations.django import DjangoIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration(), CeleryIntegration()],
+        traces_sample_rate=0.0,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Celery
@@ -216,6 +248,79 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
-# In DEBUG mode tasks run synchronously in the same process — no worker needed.
-CELERY_TASK_ALWAYS_EAGER = DEBUG
-CELERY_TASK_EAGER_PROPAGATES = DEBUG
+
+# Deliberately NOT tied to DEBUG: a staging/demo deployment left in DEBUG=True
+# used to silently run tasks synchronously with zero rate limiting between
+# sends (see the time.sleep(2) guard in tasks.py), hammering Gemini/SMTP.
+# Set this explicitly via env var for local dev without a worker running.
+CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "False").strip().lower() == "true"
+CELERY_TASK_EAGER_PROPAGATES = CELERY_TASK_ALWAYS_EAGER
+
+# A worker that dies mid-task redelivers the task instead of losing it —
+# safe because the atomic per-client claim in tasks.py makes reprocessing
+# idempotent (a client already claimed by the crashed attempt just gets
+# skipped by the retry, per _claim_client's compare-and-swap).
+CELERY_TASK_ACKS_LATE = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+# Genuinely unattended follow-ups/reply-scans (the product's own "automated
+# follow-up sequences" claim) — requires AUTOMATED_SENDER_USERNAME to be set
+# to a TeamMember whose mailbox these scheduled runs should send/scan from,
+# and a live Celery worker + beat process. Adjust cadence to taste.
+from celery.schedules import crontab  # noqa: E402
+
+CELERY_BEAT_SCHEDULE = {
+    "send-followups-periodic": {
+        "task": "outreach.send_followups",
+        "schedule": crontab(minute=0, hour="*/6"),
+    },
+    "scan-inbox-periodic": {
+        "task": "outreach.scan_inbox_for_replies",
+        "schedule": crontab(minute=0, hour="*/2"),
+    },
+    "reconcile-stuck-runs": {
+        "task": "outreach.reconcile_stuck_runs",
+        "schedule": crontab(minute="*/15"),
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+# Previously absent entirely — outreach/tasks.py's logger.info/warning/error
+# calls throughout Gemini/SMTP/IMAP error handling only reached Django's
+# default (console-only, level-WARNING-ish) config. Explicit here so the
+# outreach app's INFO-level detail (Gemini fallbacks, SMTP retries) is
+# actually emitted, wherever the deployment platform captures stdout/stderr.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{asctime} {levelname} {name}: {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+    "loggers": {
+        "outreach": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+    },
+}

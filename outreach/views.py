@@ -1,5 +1,6 @@
 import csv
 import io
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib import messages
@@ -7,6 +8,8 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LoginView
 from django.db.models import Count, Max, Q, Sum
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
+from django.utils import timezone
 
 from django.contrib.auth.models import User
 
@@ -20,11 +23,14 @@ from .forms import (
     MailboxSettingsForm,
 )
 from .models import (
+    ActionLog,
     CampaignRun,
     Client,
     EmailReply,
+    FollowupRun,
     LinkedInReachout,
     OutreachCampaign,
+    ScanRun,
     TeamMember,
 )
 from .tasks import (
@@ -338,10 +344,9 @@ def update_client_status(request, pk):
 def run_campaign(request):
     """
     GET  – shows a form to select a campaign and preview target clients.
-    POST – creates a CampaignRun, launches the task in a background thread,
-           and redirects to the live progress page.
+    POST – creates a CampaignRun, dispatches the task to Celery, and
+           redirects to the live progress page.
     """
-    import threading
     from django.conf import settings as dj_settings
 
     campaigns = OutreachCampaign.objects.all()
@@ -361,16 +366,16 @@ def run_campaign(request):
         # Create a CampaignRun row for progress tracking
         run = CampaignRun.objects.create(total=not_contacted_count)
 
-        # Launch the task in a background thread so the response returns immediately
-        def _run_task():
-            send_automated_pings(
-                campaign_id=campaign_id,
-                triggered_by_user_id=request.user.pk,
-                run_id=run.pk,
-            )
-
-        thread = threading.Thread(target=_run_task, daemon=True)
-        thread.start()
+        # Dispatch to Celery. Previously this spawned a raw daemon thread,
+        # which was silently killed (with no resumption and no failure record)
+        # by any web-process restart mid-batch. .delay() queues a real,
+        # durable task instead — see CELERY_TASK_ACKS_LATE in settings.py for
+        # what happens if the worker itself dies mid-task.
+        send_automated_pings.delay(
+            campaign_id=campaign_id,
+            triggered_by_user_id=request.user.pk,
+            run_id=run.pk,
+        )
 
         return redirect("outreach:campaign_progress_page", run_id=run.pk)
 
@@ -390,27 +395,19 @@ def campaign_progress_api(request, run_id):
     from django.http import JsonResponse
 
     run = get_object_or_404(CampaignRun, pk=run_id)
-    return JsonResponse(
-        {
-            "status": run.status,
-            "total": run.total,
-            "processed": run.processed,
-            "sent": run.sent,
-            "failed": run.failed,
-            "current_company": run.current_company,
-            "current_step": run.current_step,
-            "log": run.log,
-            "started_at": run.started_at.isoformat() if run.started_at else None,
-            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-        }
-    )
+    return JsonResponse(_run_progress_json(run))
 
 
 @login_required
 def campaign_progress_page(request, run_id):
     """Renders the live progress bar page for a campaign run."""
     run = get_object_or_404(CampaignRun, pk=run_id)
-    return render(request, "outreach/campaign_progress.html", {"run": run})
+    api_url = reverse("outreach:campaign_progress_api", kwargs={"run_id": run.pk})
+    return render(
+        request,
+        "outreach/campaign_progress.html",
+        {"run": run, "run_label": "Campaign", "api_url": api_url},
+    )
 
 
 @login_required
@@ -426,34 +423,13 @@ def scan_replies(request):
             messages.error(request, mailbox_error)
             return redirect("outreach:mailbox_settings")
 
-        result = scan_inbox_for_replies(triggered_by_user_id=request.user.pk)
-
-        if "error" in result:
-            messages.error(request, f"Scan failed: {result['error']}")
-        else:
-            new = result.get("new_replies", 0)
-            scanned = result.get("scanned", 0)
-            mailbox = result.get("mailbox", "?")
-            if new:
-                messages.success(
-                    request,
-                    f"Scanned <strong>{scanned}</strong> client(s) in <em>{mailbox}</em>. "
-                    f"Found <strong>{new}</strong> new reply(ies). "
-                    f"Sentiment analysis complete.",
-                    extra_tags="safe",
-                )
-            else:
-                messages.info(
-                    request,
-                    f"Scanned <strong>{scanned}</strong> client(s) in <em>{mailbox}</em>. "
-                    f"No new replies found.",
-                    extra_tags="safe",
-                )
-            if result.get("errors"):
-                for err in result["errors"]:
-                    messages.warning(request, err)
-
-        return redirect("outreach:scan_replies")
+        # Dispatched to Celery instead of running inline in this request —
+        # a large inbox scan (IMAP fetch + a Gemini sentiment call per
+        # message) previously risked hitting Gunicorn's default 30s worker
+        # timeout when run synchronously here.
+        run = ScanRun.objects.create()
+        scan_inbox_for_replies.delay(triggered_by_user_id=request.user.pk, run_id=run.pk)
+        return redirect("outreach:scan_progress_page", run_id=run.pk)
 
     # Stats for the GET page
     total_pinged = Client.objects.filter(
@@ -474,6 +450,42 @@ def scan_replies(request):
             "total_replied": total_replied,
             "recent_replies": recent_replies,
         },
+    )
+
+
+def _run_progress_json(run):
+    return {
+        "status": run.status,
+        "total": run.total,
+        "processed": run.processed,
+        "sent": run.sent,
+        "failed": run.failed,
+        "current_company": run.current_company,
+        "current_step": run.current_step,
+        "log": run.log,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+    }
+
+
+@login_required
+def scan_progress_api(request, run_id):
+    """JSON endpoint polled by the reply-scan progress page."""
+    from django.http import JsonResponse
+
+    run = get_object_or_404(ScanRun, pk=run_id)
+    return JsonResponse(_run_progress_json(run))
+
+
+@login_required
+def scan_progress_page(request, run_id):
+    """Renders the live progress bar page for a reply-scan run."""
+    run = get_object_or_404(ScanRun, pk=run_id)
+    api_url = reverse("outreach:scan_progress_api", kwargs={"run_id": run.pk})
+    return render(
+        request,
+        "outreach/campaign_progress.html",
+        {"run": run, "run_label": "Reply Scan", "api_url": api_url},
     )
 
 
@@ -535,42 +547,22 @@ def run_followups(request):
     GET  — show follow-up candidates and summary.
     POST — send follow-up emails to eligible clients.
     """
-    from datetime import timedelta
-
     if request.method == "POST":
         mailbox_ready, mailbox_error = _validate_user_mailbox(request.user)
         if not mailbox_ready:
             messages.error(request, mailbox_error)
             return redirect("outreach:mailbox_settings")
 
-        result = send_followups(triggered_by_user_id=request.user.pk)
-        sent = result.get("sent", 0)
-        failed = result.get("failed", 0)
-        skipped = result.get("skipped", 0)
-
-        if result.get("error"):
-            messages.error(request, result["error"])
-            return redirect("outreach:run_followups")
-
-        if sent:
-            messages.success(
-                request,
-                f"<strong>{sent}</strong> follow-up(s) sent. "
-                f"<strong>{skipped}</strong> skipped (too soon). "
-                f"<strong>{failed}</strong> failed.",
-                extra_tags="safe",
-            )
-        else:
-            messages.info(
-                request,
-                f"No follow-ups sent. <strong>{skipped}</strong> client(s) not yet due.",
-                extra_tags="safe",
-            )
-
-        return redirect("outreach:run_followups")
+        # Dispatched to Celery instead of running inline in this request —
+        # each follow-up involves a Gemini call plus an SMTP send, so a
+        # batch of any size risked hitting Gunicorn's default 30s timeout
+        # when this ran synchronously here.
+        run = FollowupRun.objects.create()
+        send_followups.delay(triggered_by_user_id=request.user.pk, run_id=run.pk)
+        return redirect("outreach:followup_progress_page", run_id=run.pk)
 
     # Eligible candidates
-    from .tasks import _FOLLOWUP_INTERVALS, _MAX_FOLLOWUPS
+    from .tasks import _MAX_FOLLOWUPS
 
     max_followups = getattr(settings, "MAX_FOLLOWUPS", _MAX_FOLLOWUPS)
     candidates = (
@@ -591,6 +583,27 @@ def run_followups(request):
             "candidates": candidates,
             "max_followups": max_followups,
         },
+    )
+
+
+@login_required
+def followup_progress_api(request, run_id):
+    """JSON endpoint polled by the follow-up progress page."""
+    from django.http import JsonResponse
+
+    run = get_object_or_404(FollowupRun, pk=run_id)
+    return JsonResponse(_run_progress_json(run))
+
+
+@login_required
+def followup_progress_page(request, run_id):
+    """Renders the live progress bar page for a follow-up run."""
+    run = get_object_or_404(FollowupRun, pk=run_id)
+    api_url = reverse("outreach:followup_progress_api", kwargs={"run_id": run.pk})
+    return render(
+        request,
+        "outreach/campaign_progress.html",
+        {"run": run, "run_label": "Follow-up", "api_url": api_url},
     )
 
 
@@ -690,7 +703,12 @@ def team_edit(request, pk):
             profile.sender_name = form.cleaned_data["sender_name"]
             profile.sender_role = form.cleaned_data["sender_role"]
             profile.mailbox_email = form.cleaned_data["mailbox_email"]
-            profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
+            # Only overwrite when a new password was actually submitted —
+            # previously a blank submission always overwrote, silently
+            # wiping the stored password whenever an admin edited a member
+            # without intending to touch their mailbox credentials.
+            if form.cleaned_data["mailbox_app_password"]:
+                profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
             profile.save()
             messages.success(
                 request,
@@ -707,7 +725,11 @@ def team_edit(request, pk):
                 "sender_name": profile.sender_name,
                 "sender_role": profile.sender_role,
                 "mailbox_email": profile.mailbox_email,
-                "mailbox_app_password": profile.mailbox_app_password,
+                # Deliberately not prefilling mailbox_app_password — echoing
+                # the stored secret back into page HTML on every edit-form
+                # load is exactly the exposure this field's encryption is
+                # meant to reduce. The placeholder tells the admin blank
+                # means "leave unchanged".
                 "role": profile.role,
                 "is_active": target_user.is_active,
             }
@@ -731,7 +753,8 @@ def mailbox_settings(request):
             profile.sender_name = form.cleaned_data["sender_name"]
             profile.sender_role = form.cleaned_data["sender_role"]
             profile.mailbox_email = form.cleaned_data["mailbox_email"]
-            profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
+            if form.cleaned_data["mailbox_app_password"]:
+                profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
             profile.save()
             messages.success(request, "Mailbox settings updated.")
             return redirect("outreach:mailbox_settings")
@@ -741,7 +764,7 @@ def mailbox_settings(request):
                 "sender_name": profile.sender_name,
                 "sender_role": profile.sender_role,
                 "mailbox_email": profile.mailbox_email,
-                "mailbox_app_password": profile.mailbox_app_password,
+                # Not prefilling mailbox_app_password — see team_edit above.
             }
         )
 
@@ -844,4 +867,78 @@ def leaderboard(request):
         request,
         "outreach/leaderboard.html",
         {"member_stats": stats, "shared": shared_stats},
+    )
+
+
+@login_required
+def reliability_dashboard(request):
+    """
+    Admin-only view surfacing how often Gemini generation silently falls back
+    to the static template, and how often SMTP sends fail — data that used
+    to be invisible outside raw log lines / CampaignRun.log JSON.
+    """
+    if not _is_admin(request.user):
+        messages.error(request, "Only admins can view the reliability dashboard.")
+        return redirect("outreach:dashboard")
+
+    window_start = timezone.now() - timedelta(days=30)
+
+    action_logs = ActionLog.objects.filter(emailed_at__gte=window_start)
+    total_sent = action_logs.count()
+    ai_used_count = action_logs.filter(ai_used=True).count()
+    fallback_count = total_sent - ai_used_count
+    overall_fallback_rate = (
+        round(fallback_count / total_sent * 100, 1) if total_sent else None
+    )
+
+    recent_fallbacks = (
+        action_logs.filter(ai_used=False)
+        .select_related("client", "team_member")
+        .order_by("-emailed_at")[:25]
+    )
+
+    def _run_rows(queryset, label):
+        rows = []
+        for run in queryset.order_by("-started_at")[:10]:
+            rows.append(
+                {
+                    "kind": label,
+                    "pk": run.pk,
+                    "status": run.status,
+                    "started_at": run.started_at,
+                    "processed": run.processed,
+                    "total": run.total,
+                    "sent": run.sent,
+                    "failed": run.failed,
+                    "ai_fallback_rate": run.ai_fallback_rate,
+                    "smtp_failure_rate": run.smtp_failure_rate,
+                }
+            )
+        return rows
+
+    run_rows = (
+        _run_rows(CampaignRun.objects.all(), "Campaign")
+        + _run_rows(FollowupRun.objects.all(), "Follow-up")
+        + _run_rows(ScanRun.objects.all(), "Reply Scan")
+    )
+    run_rows.sort(key=lambda r: r["started_at"] or timezone.now(), reverse=True)
+
+    stuck_clients = Client.objects.filter(
+        status=Client.Status.SENDING,
+        updated_at__lt=timezone.now() - timedelta(minutes=15),
+    )
+
+    return render(
+        request,
+        "outreach/reliability.html",
+        {
+            "window_days": 30,
+            "total_sent": total_sent,
+            "ai_used_count": ai_used_count,
+            "fallback_count": fallback_count,
+            "overall_fallback_rate": overall_fallback_rate,
+            "recent_fallbacks": recent_fallbacks,
+            "run_rows": run_rows[:20],
+            "stuck_clients": stuck_clients,
+        },
     )

@@ -95,6 +95,13 @@
             {% endif %}
             <div class="form-text">
               Used for both sending outreach and scanning replies for this user.
+              {% if editing %}
+                {% if profile.mailbox_app_password %}
+                  <span class="text-success"><i class="bi bi-check-circle-fill"></i> A password is currently set — leave blank to keep it.</span>
+                {% else %}
+                  <span class="text-warning"><i class="bi bi-exclamation-triangle-fill"></i> No password set yet.</span>
+                {% endif %}
+              {% endif %}
             </div>
           </div>
 

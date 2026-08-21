@@ -51,7 +51,14 @@
           <div class="mb-4">
             <label for="id_mailbox_app_password" class="form-label fw-semibold">Mailbox App Password</label>
             {{ form.mailbox_app_password }}
-            <div class="form-text">For Gmail, use an app password rather than your normal password.</div>
+            <div class="form-text">
+              For Gmail, use an app password rather than your normal password.
+              {% if profile.mailbox_app_password %}
+                <span class="text-success"><i class="bi bi-check-circle-fill"></i> A password is currently set — leave blank to keep it.</span>
+              {% else %}
+                <span class="text-warning"><i class="bi bi-exclamation-triangle-fill"></i> No password set yet.</span>
+              {% endif %}
+            </div>
           </div>
 
           <div class="d-flex gap-2">

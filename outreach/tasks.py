@@ -17,19 +17,27 @@ from email.mime.text import MIMEText
 from email.header import decode_header
 from email.utils import formataddr, parsedate_to_datetime
 
-from google import genai
 from celery import shared_task
 from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
+from . import ai_client
 from .models import (
     ActionLog,
     CampaignRun,
     Client,
     EmailReply,
+    FollowupRun,
     OutreachCampaign,
-    TeamMember,
+    RunStatus,
+    ScanRun,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,7 +70,28 @@ def _build_email_body(client, campaign):
 
 
 def _resolve_sender_profile(user=None):
-    """Resolve sender identity + mailbox credentials for the triggering user."""
+    """
+    Resolve sender identity + mailbox credentials for the triggering user.
+
+    When user is None (an unattended Celery-Beat-triggered run has no
+    interactive "triggering user"), fall back to settings.AUTOMATED_SENDER_USERNAME
+    — a TeamMember designated to send/scan on behalf of scheduled runs.
+    Without this, scheduled runs would silently resolve to empty credentials
+    and fail every send.
+    """
+    if user is None:
+        automated_username = getattr(settings, "AUTOMATED_SENDER_USERNAME", "")
+        if automated_username:
+            from django.contrib.auth.models import User as _User
+
+            try:
+                user = _User.objects.get(username=automated_username)
+            except _User.DoesNotExist:
+                logger.warning(
+                    "AUTOMATED_SENDER_USERNAME=%s does not match any user.",
+                    automated_username,
+                )
+
     profile = getattr(user, "profile", None) if user else None
     sender_name = (
         (profile.effective_sender_name if profile else "")
@@ -104,6 +133,87 @@ def _validate_sender_profile(sender_profile):
     return None
 
 
+def _claim_client(client_pk: int, expected_status: str) -> bool:
+    """
+    Atomically transition a client from expected_status to SENDING, as a
+    compare-and-swap: Django's queryset.update() compiles to a single
+    UPDATE ... WHERE ... statement, so two concurrent runs (a double-click,
+    or an overlapping campaign + follow-up run) racing on the same client
+    can never both succeed — exactly one UPDATE affects a row. Returns True
+    iff this call won the claim.
+    """
+    updated = Client.objects.filter(pk=client_pk, status=expected_status).update(
+        status=Client.Status.SENDING
+    )
+    return updated == 1
+
+
+def _release_client(client_pk: int, status: str, **extra_fields):
+    """Move a claimed client out of the transient SENDING status."""
+    extra_fields["status"] = status
+    Client.objects.filter(pk=client_pk).update(**extra_fields)
+
+
+SMTP_TIMEOUT_SECONDS = 30
+
+# Transient SMTP failures are worth a short retry (server hiccup, dropped
+# connection); auth/recipient-refused failures are permanent and must not be
+# retried — retrying a wrong password just wastes time and can trip Gmail's
+# brute-force lockout. Deliberately NOT a bare `OSError`: smtplib.SMTPException
+# (and so SMTPAuthenticationError/SMTPRecipientsRefused) is itself a subclass
+# of OSError in Python's stdlib, so a bare OSError filter here would silently
+# retry permanent auth failures too. ConnectionError/TimeoutError are OSError
+# subclasses that never overlap with smtplib's exception hierarchy.
+_TRANSIENT_SMTP_EXCEPTIONS = (
+    smtplib.SMTPServerDisconnected,
+    smtplib.SMTPConnectError,
+    ConnectionError,
+    TimeoutError,
+)
+
+
+def _open_smtp_connection(sender_profile: dict) -> smtplib.SMTP:
+    """Open, EHLO, STARTTLS, and log in a fresh SMTP connection."""
+    server = smtplib.SMTP(
+        sender_profile["smtp_host"],
+        sender_profile["smtp_port"],
+        timeout=SMTP_TIMEOUT_SECONDS,
+    )
+    server.ehlo()
+    server.starttls()
+    server.login(sender_profile["mailbox_email"], sender_profile["mailbox_password"])
+    return server
+
+
+def _smtp_preflight(sender_profile: dict) -> tuple[bool, str]:
+    """
+    Verify the sender's mailbox actually authenticates before a batch starts,
+    so a bad password is caught immediately instead of after every client in
+    the batch has already burned a Gemini API call.
+    """
+    try:
+        server = _open_smtp_connection(sender_profile)
+        try:
+            server.noop()
+        finally:
+            server.quit()
+        return True, "ok"
+    except smtplib.SMTPAuthenticationError:
+        return False, "SMTP authentication failed — check the mailbox app password."
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Could not connect to mailbox: {exc}"
+
+
+@retry(
+    retry=retry_if_exception_type(_TRANSIENT_SMTP_EXCEPTIONS),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def _send_via_connection(server: smtplib.SMTP, msg, sender: str, all_recipients: list[str]):
+    server.send_message(msg, from_addr=sender, to_addrs=all_recipients)
+
+
 def _send_single_email(
     *,
     recipient_email: str,
@@ -111,37 +221,41 @@ def _send_single_email(
     body: str,
     cc_emails: list[str],
     sender_profile: dict,
+    connection: smtplib.SMTP | None = None,
 ) -> tuple[bool, str]:
     """
-    Send one email via SMTP using credentials from Django settings (sourced from
-    the .env file).  Returns (success: bool, message: str).
+    Send one email via SMTP. Returns (success: bool, message: str).
 
     This function is deliberately isolated so that a failure on one recipient
-    never crashes the outer task loop.
+    never crashes the outer task loop. If `connection` is provided it's reused
+    (avoids re-authenticating per email across a batch); transient failures on
+    that connection (dropped/reset) are retried a few times with backoff.
+    Permanent failures (bad auth, recipient refused) are never retried.
     """
     sender = sender_profile["mailbox_email"]
     password = sender_profile["mailbox_password"]
-    smtp_host = sender_profile["smtp_host"]
-    smtp_port = sender_profile["smtp_port"]
 
     if not sender or not password:
         return False, "Mailbox email or app password is not configured for this user."
 
-    try:
-        msg = MIMEMultipart()
-        msg["Subject"] = subject
-        msg["From"] = sender_profile["from_header"]
-        msg["To"] = recipient_email
-        if cc_emails:
-            msg["Cc"] = ", ".join(cc_emails)
-        msg.attach(MIMEText(body, "plain"))
+    msg = MIMEMultipart()
+    msg["Subject"] = subject
+    msg["From"] = sender_profile["from_header"]
+    msg["To"] = recipient_email
+    if cc_emails:
+        msg["Cc"] = ", ".join(cc_emails)
+    msg.attach(MIMEText(body, "plain"))
+    all_recipients = [recipient_email] + cc_emails
 
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(sender, password)
-            all_recipients = [recipient_email] + cc_emails
-            server.send_message(msg, from_addr=sender, to_addrs=all_recipients)
+    try:
+        if connection is not None:
+            _send_via_connection(connection, msg, sender, all_recipients)
+        else:
+            server = _open_smtp_connection(sender_profile)
+            try:
+                _send_via_connection(server, msg, sender, all_recipients)
+            finally:
+                server.quit()
 
         return True, "Sent"
 
@@ -193,10 +307,12 @@ def _build_default_body(client, sender_profile):
 # ---------------------------------------------------------------------------
 
 
-def _google_search_snippets(ai_client, model_name, company, industry, website):
+def _google_search_snippets(api_key, model_name, company, industry, website):
     """
     Use Gemini with Google Search grounding to pull live context about a company.
-    Returns a short research summary string.
+    Returns a short research summary string. Non-fatal on any failure — an
+    empty research summary just means the email is written without live
+    context, it's never worth failing the whole generation over.
     """
     try:
         from google.genai import types
@@ -208,9 +324,10 @@ def _google_search_snippets(ai_client, model_name, company, industry, website):
             f"Write a concise 3-4 sentence summary of what they do, their mission, "
             f"key products/services, and any notable achievements or recent news."
         )
-        response = ai_client.models.generate_content(
-            model=model_name,
-            contents=research_prompt,
+        response = ai_client.generate_text(
+            api_key=api_key,
+            model_name=model_name,
+            prompt=research_prompt,
             config=types.GenerateContentConfig(tools=[search_tool]),
         )
         return response.text.strip()
@@ -219,16 +336,18 @@ def _google_search_snippets(ai_client, model_name, company, industry, website):
         return ""
 
 
-def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str]:
+def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str, dict]:
     """
     Generate a fully personalised subject + body for *client* using Gemini.
 
     Step 1: Research the company via Google Search grounding to get live context.
-    Step 2: Feed all Apollo fields + research into a detailed prompt.
-    Falls back to the static template when GOOGLE_API_KEY is absent or the
-    API call fails.
+    Step 2: Feed all Apollo fields + research into a detailed, structured-output
+    prompt so the response is returned as JSON (no more fragile string-splitting).
+    Falls back to the static template when GOOGLE_API_KEY is absent, or the
+    API call fails after retrying transient errors.
 
-    Returns (subject, body).
+    Returns (subject, body, meta) where meta = {"ai_used": bool,
+    "fallback_reason": str | None, "notes": list[str]}.
     """
     api_key = getattr(settings, "GOOGLE_API_KEY", "")
     if not api_key:
@@ -237,10 +356,13 @@ def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str]
             client.pk,
         )
         subject = _DEFAULT_SUBJECT_TPL.format(company=client.company_name)
-        return subject, _build_default_body(client, sender_profile)
+        return (
+            subject,
+            _build_default_body(client, sender_profile),
+            {"ai_used": False, "fallback_reason": "GOOGLE_API_KEY not configured", "notes": []},
+        )
 
     try:
-        ai_client = genai.Client(api_key=api_key)
         model_name = getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
 
         parts = client.contact_person.split()
@@ -257,7 +379,7 @@ def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str]
 
         # -- Step 1: Research the company via Google Search grounding ----------
         search_snippets = _google_search_snippets(
-            ai_client, model_name, company, industry, website
+            api_key, model_name, company, industry, website
         )
 
         # -- Step 2: Build the consultant identity ----------------------------
@@ -273,13 +395,11 @@ def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str]
             )
 
         prompt = (
-            "You are an expert business consultant tasked with writing highly professional, "
-            "personalized outreach emails to companies. Each email should include:\n"
+            "Write highly professional, personalized outreach emails to companies. "
+            "Each email should include:\n"
             "- A compelling, relevant subject line.\n"
             "- A detailed, friendly, and professional body that references the company's background and mission.\n"
             "- The email should be from the consultant (details below) to the company (details below).\n"
-            "- Do not include any labels like 'Subject:' or 'Body:'.\n"
-            "- The output must be the subject line, then a newline, then the full email body.\n"
             "- The email should be suitable for a first contact and encourage a reply.\n"
             "- The length limit is two paragraphs, be detailed on what 180DC IITKGP can offer to them and be direct.\n"
             "Here is a sample mail, you must refer to a similar format only for sending the mails:\n\n"
@@ -323,47 +443,50 @@ def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str]
             f"Company Location: {location or 'N/A'}\n"
             f"Recent Google Search Results about {company}:\n{search_snippets or 'No results available'}\n"
             f"{campaign_context}\n"
-            "Now generate the email. Output ONLY the subject line on the first line, "
-            "then a blank line, then the full email body (greeting through signature). "
-            "Nothing else."
+            "Now generate the email as JSON matching the given schema: "
+            "'subject' is the subject line only, 'body' is the full email body "
+            "(greeting through signature)."
         )
 
-        response = ai_client.models.generate_content(
-            model=model_name,
-            contents=prompt,
+        result = ai_client.generate_json(
+            api_key=api_key,
+            model_name=model_name,
+            prompt=prompt,
+            response_schema=ai_client.EMAIL_RESPONSE_SCHEMA,
         )
-        content = response.text.strip()
-
-        # Parse: first line = subject, rest = body
-        lines = content.split("\n", 1)
-        if len(lines) == 2:
-            subject_raw = lines[0].strip()
-            ai_body = lines[1].strip()
-        else:
-            subject_raw = f"180DC IIT Kharagpur X {company}"
-            ai_body = content
-
-        # Clean up subject — strip any accidental "Subject:" prefix
-        for prefix in ("SUBJECT:", "Subject:", "subject:"):
-            if subject_raw.startswith(prefix):
-                subject_raw = subject_raw[len(prefix) :].strip()
-
-        # Ensure subject starts correctly
-        if not subject_raw.upper().startswith("180DC"):
-            subject_raw = f"180DC IIT Kharagpur X {company}"
+        subject_raw, ai_body, notes = ai_client.validate_and_clean(
+            result.get("subject", ""),
+            result.get("body", ""),
+            subject_prefix="180DC",
+        )
+        if not ai_body:
+            raise ValueError("Gemini returned an empty email body")
+        if notes:
+            logger.info(
+                "Gemini email for client %s [%s] needed cleanup: %s",
+                client.pk,
+                company,
+                "; ".join(notes),
+            )
 
         logger.info("Gemini generated email for client %s [%s].", client.pk, company)
-        return subject_raw, ai_body
+        return subject_raw, ai_body, {"ai_used": True, "fallback_reason": None, "notes": notes}
 
     except Exception as exc:
+        classification = ai_client.classify_gemini_exception(exc)
         logger.warning(
-            "Gemini generation failed for client %s (%s): %s — falling back to static template.",
+            "Gemini generation failed for client %s (%s) [%s]: %s — falling back to static template.",
             client.pk,
             client.company_name,
+            classification,
             exc,
         )
         subject = _DEFAULT_SUBJECT_TPL.format(company=client.company_name)
-        return subject, _build_default_body(client, sender_profile)
+        return (
+            subject,
+            _build_default_body(client, sender_profile),
+            {"ai_used": False, "fallback_reason": f"{classification}: {exc}", "notes": []},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +551,15 @@ def send_automated_pings(
         _update_run(status=CampaignRun.RunStatus.FAILED, current_step="mailbox setup")
         return {"status": "error", "sent": 0, "failed": 0, "error": sender_error}
 
+    # -- Fail fast: verify the mailbox actually authenticates before burning
+    # Gemini quota on every client in the batch (previously Gemini ran first
+    # and only the very first SMTP attempt would reveal a bad password).
+    preflight_ok, preflight_msg = _smtp_preflight(sender_profile)
+    if not preflight_ok:
+        logger.warning("send_automated_pings: SMTP preflight failed: %s", preflight_msg)
+        _update_run(status=CampaignRun.RunStatus.FAILED, current_step="mailbox setup")
+        return {"status": "error", "sent": 0, "failed": 0, "error": preflight_msg}
+
     # -- CC list from settings -----------------------------------------------
     cc_raw = getattr(settings, "OUTREACH_CC_EMAILS", "")
     cc_emails = [e.strip() for e in cc_raw.split(",") if e.strip()]
@@ -461,103 +593,145 @@ def send_automated_pings(
     failed_details = []
     run_log = []
 
-    for index, client in enumerate(clients):
-        # Skip records with no email address
-        if not client.email:
-            logger.warning("Client %s has no email address — skipping.", client.pk)
-            run_log.append(
-                {
-                    "company": client.company_name,
-                    "status": "skipped",
-                    "detail": "No email",
-                }
-            )
-            _update_run(processed=index + 1, log=run_log)
-            continue
+    try:
+        smtp_connection = _open_smtp_connection(sender_profile)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("send_automated_pings: could not open SMTP connection: %s", exc)
+        _update_run(status=CampaignRun.RunStatus.FAILED, current_step="mailbox setup")
+        return {"status": "error", "sent": 0, "failed": 0, "error": str(exc)}
 
-        # -- Progress: researching -------------------------------------------
-        _update_run(
-            current_company=client.company_name,
-            current_step="researching",
-            processed=index,
-        )
+    try:
+        for index, client in enumerate(clients):
+            # Skip records with no email address
+            if not client.email:
+                logger.warning("Client %s has no email address — skipping.", client.pk)
+                run_log.append(
+                    {
+                        "company": client.company_name,
+                        "status": "skipped",
+                        "detail": "No email",
+                    }
+                )
+                _update_run(processed=index + 1, log=run_log)
+                continue
 
-        # -- Progress: generating --------------------------------------------
-        _update_run(current_step="generating")
-        subject, body = _generate_ai_email(client, sender_profile, campaign)
+            # -- Atomic claim: closes the race where a double-click or an
+            # overlapping run picks up the same shared-pool client twice.
+            if not _claim_client(client.pk, Client.Status.NOT_CONTACTED):
+                logger.info(
+                    "Client %s already claimed by another run — skipping.", client.pk
+                )
+                run_log.append(
+                    {
+                        "company": client.company_name,
+                        "status": "skipped",
+                        "detail": "Claimed by another concurrent run",
+                    }
+                )
+                _update_run(processed=index + 1, log=run_log)
+                continue
 
-        # -- Progress: sending -----------------------------------------------
-        _update_run(current_step="sending")
-        success, message = _send_single_email(
-            recipient_email=client.email,
-            subject=subject,
-            body=body,
-            cc_emails=cc_emails,
-            sender_profile=sender_profile,
-        )
-
-        if success:
-            # Update client record
-            client.status = Client.Status.PINGED
-            client.last_contacted_at = timezone.now()
-            client.save(update_fields=["status", "last_contacted_at", "updated_at"])
-
-            # Write action log
-            ActionLog.objects.create(
-                team_member=triggering_user,
-                client=client,
-                campaign=campaign,
-                notes=f"AI-personalised ping. Subject: {subject}",
+            # -- Progress: researching -------------------------------------------
+            _update_run(
+                current_company=client.company_name,
+                current_step="researching",
+                processed=index,
             )
 
-            sent_count += 1
-            run_log.append(
-                {
-                    "company": client.company_name,
-                    "email": client.email,
-                    "status": "sent",
-                }
-            )
-            logger.info(
-                "  [%d/%d] Sent → %s <%s>",
-                index + 1,
-                len(clients),
-                client.company_name,
-                client.email,
-            )
-        else:
-            failed_count += 1
-            failed_details.append(
-                {"client_id": client.pk, "email": client.email, "error": message}
-            )
-            run_log.append(
-                {
-                    "company": client.company_name,
-                    "email": client.email,
-                    "status": "failed",
-                    "detail": message,
-                }
-            )
-            logger.error(
-                "  [%d/%d] FAILED → %s <%s>: %s",
-                index + 1,
-                len(clients),
-                client.company_name,
-                client.email,
-                message,
+            # -- Progress: generating --------------------------------------------
+            _update_run(current_step="generating")
+            subject, body, gen_meta = _generate_ai_email(client, sender_profile, campaign)
+
+            # -- Progress: sending -----------------------------------------------
+            _update_run(current_step="sending")
+            success, message = _send_single_email(
+                recipient_email=client.email,
+                subject=subject,
+                body=body,
+                cc_emails=cc_emails,
+                sender_profile=sender_profile,
+                connection=smtp_connection,
             )
 
-        _update_run(
-            processed=index + 1,
-            sent=sent_count,
-            failed=failed_count,
-            log=run_log,
-        )
+            if success:
+                # Update client record — this also releases the SENDING claim.
+                client.status = Client.Status.PINGED
+                client.last_contacted_at = timezone.now()
+                client.save(update_fields=["status", "last_contacted_at", "updated_at"])
 
-        # Rate-limit delay — skip when running eagerly (in-process/DEBUG)
-        eager = getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False)
-        if not eager and index < len(clients) - 1:
-            time.sleep(2)
+                # Write action log
+                log_note = (
+                    "AI-personalised ping." if gen_meta["ai_used"] else "Ping (template fallback)."
+                )
+                ActionLog.objects.create(
+                    team_member=triggering_user,
+                    client=client,
+                    campaign=campaign,
+                    notes=f"{log_note} Subject: {subject}",
+                    ai_used=gen_meta["ai_used"],
+                    ai_failure_reason=gen_meta.get("fallback_reason") or "",
+                    email_body=body,
+                )
+
+                sent_count += 1
+                run_log.append(
+                    {
+                        "company": client.company_name,
+                        "email": client.email,
+                        "status": "sent",
+                        "ai_used": gen_meta["ai_used"],
+                        "ai_failure_reason": gen_meta.get("fallback_reason"),
+                    }
+                )
+                logger.info(
+                    "  [%d/%d] Sent → %s <%s> (ai_used=%s)",
+                    index + 1,
+                    len(clients),
+                    client.company_name,
+                    client.email,
+                    gen_meta["ai_used"],
+                )
+            else:
+                # Release the claim so this client is retryable on the next run.
+                _release_client(client.pk, Client.Status.NOT_CONTACTED)
+
+                failed_count += 1
+                failed_details.append(
+                    {"client_id": client.pk, "email": client.email, "error": message}
+                )
+                run_log.append(
+                    {
+                        "company": client.company_name,
+                        "email": client.email,
+                        "status": "failed",
+                        "detail": message,
+                    }
+                )
+                logger.error(
+                    "  [%d/%d] FAILED → %s <%s>: %s",
+                    index + 1,
+                    len(clients),
+                    client.company_name,
+                    client.email,
+                    message,
+                )
+
+            _update_run(
+                processed=index + 1,
+                sent=sent_count,
+                failed=failed_count,
+                log=run_log,
+            )
+
+            # Rate-limit delay — skip when running eagerly (in-process/DEBUG)
+            eager = getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False)
+            if not eager and index < len(clients) - 1:
+                time.sleep(2)
+    finally:
+        try:
+            smtp_connection.quit()
+        except Exception:  # noqa: BLE001
+            pass
 
     _update_run(
         status=CampaignRun.RunStatus.COMPLETED,
@@ -624,14 +798,15 @@ def _extract_text_body(msg):
 def _analyze_reply_sentiment(reply_text, company_name):
     """
     Use Gemini to classify the sentiment of a client reply.
-    Returns (sentiment_label, summary_text).
+    Returns (sentiment_label, summary_text, meta) where meta = {"ai_used": bool,
+    "fallback_reason": str | None}.
     """
     api_key = getattr(settings, "GOOGLE_API_KEY", "")
     if not api_key or not reply_text.strip():
-        return Client.Sentiment.UNKNOWN, ""
+        reason = "GOOGLE_API_KEY not configured" if not api_key else "empty reply text"
+        return Client.Sentiment.UNKNOWN, "", {"ai_used": False, "fallback_reason": reason}
 
     try:
-        ai_client = genai.Client(api_key=api_key)
         model_name = getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
 
         prompt = (
@@ -645,18 +820,20 @@ def _analyze_reply_sentiment(reply_text, company_name):
             "- Neutral (acknowledgement without clear interest or disinterest)\n"
             "- Negative (critical, unhappy, complaints)\n"
             "- Not Interested (polite decline, not relevant, asks to stop contacting)\n\n"
-            "Output ONLY two lines:\n"
-            "Line 1: The sentiment label (exactly one of: Positive, Interested, Neutral, Negative, Not Interested)\n"
-            "Line 2: A one-sentence explanation of why you chose this sentiment.\n"
-            "Nothing else."
+            "Respond as JSON matching the given schema: 'sentiment' is exactly one of "
+            "the category labels above, 'explanation' is a one-sentence justification."
         )
 
-        response = ai_client.models.generate_content(model=model_name, contents=prompt)
-        lines = response.text.strip().split("\n", 1)
-        label = lines[0].strip()
-        summary = lines[1].strip() if len(lines) > 1 else ""
+        result = ai_client.generate_json(
+            api_key=api_key,
+            model_name=model_name,
+            prompt=prompt,
+            response_schema=ai_client.SENTIMENT_RESPONSE_SCHEMA,
+            system_instruction=None,
+        )
+        label = (result.get("sentiment") or "").strip()
+        summary = (result.get("explanation") or "").strip()
 
-        # Map to valid choice
         valid_map = {
             "Positive": Client.Sentiment.POSITIVE,
             "Interested": Client.Sentiment.INTERESTED,
@@ -665,11 +842,18 @@ def _analyze_reply_sentiment(reply_text, company_name):
             "Not Interested": Client.Sentiment.NOT_INTERESTED,
         }
         sentiment = valid_map.get(label, Client.Sentiment.UNKNOWN)
-        return sentiment, summary
+        return sentiment, summary, {"ai_used": True, "fallback_reason": None}
 
     except Exception as exc:
-        logger.warning("Sentiment analysis failed for %s: %s", company_name, exc)
-        return Client.Sentiment.UNKNOWN, ""
+        classification = ai_client.classify_gemini_exception(exc)
+        logger.warning(
+            "Sentiment analysis failed for %s [%s]: %s", company_name, classification, exc
+        )
+        return (
+            Client.Sentiment.UNKNOWN,
+            "",
+            {"ai_used": False, "fallback_reason": f"{classification}: {exc}"},
+        )
 
 
 def _find_all_mail_folder(mail):
@@ -732,7 +916,7 @@ def _process_imap_message(msg, client, debug_log):
     }
 
 
-def scan_inbox_for_replies(triggered_by_user_id: int | None = None):
+def _scan_inbox_for_replies_impl(triggered_by_user_id: int | None = None):
     """
     Connect to IMAP, scan for replies from pinged/follow-up clients,
     create EmailReply records, run sentiment analysis, and update client status.
@@ -857,7 +1041,7 @@ def scan_inbox_for_replies(triggered_by_user_id: int | None = None):
                         continue
                     processed_msg_ids.add(parsed["message_id"])
 
-                    sentiment, sentiment_summary = _analyze_reply_sentiment(
+                    sentiment, sentiment_summary, _sentiment_meta = _analyze_reply_sentiment(
                         parsed["body"], client.company_name
                     )
                     EmailReply.objects.create(
@@ -934,7 +1118,7 @@ def scan_inbox_for_replies(triggered_by_user_id: int | None = None):
                         f"(from: {from_header.strip()})"
                     )
 
-                    sentiment, sentiment_summary = _analyze_reply_sentiment(
+                    sentiment, sentiment_summary, _sentiment_meta = _analyze_reply_sentiment(
                         parsed["body"], matched_client.company_name
                     )
                     EmailReply.objects.create(
@@ -972,6 +1156,59 @@ def scan_inbox_for_replies(triggered_by_user_id: int | None = None):
     }
 
 
+@shared_task(
+    bind=True,
+    name="outreach.scan_inbox_for_replies",
+    autoretry_for=(imaplib.IMAP4.abort, ConnectionError, TimeoutError),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 2},
+)
+def scan_inbox_for_replies(self, triggered_by_user_id: int | None = None, run_id: int | None = None):
+    """
+    Celery task wrapper around _scan_inbox_for_replies_impl, adding live
+    progress tracking via a ScanRun row (mirrors send_automated_pings /
+    send_followups) so this no longer has to block the request/response
+    cycle — it used to run entirely synchronously inline in the scan_replies
+    view, risking Gunicorn's default 30s worker timeout on a large inbox.
+    """
+    run = None
+    if run_id:
+        try:
+            run = ScanRun.objects.get(pk=run_id)
+        except ScanRun.DoesNotExist:
+            pass
+
+    def _update_run(**kwargs):
+        if run:
+            for k, v in kwargs.items():
+                setattr(run, k, v)
+            run.save(update_fields=list(kwargs.keys()))
+
+    _update_run(current_step="scanning")
+    result = _scan_inbox_for_replies_impl(triggered_by_user_id=triggered_by_user_id)
+
+    if "error" in result:
+        _update_run(
+            status=ScanRun.RunStatus.FAILED,
+            current_step="error",
+            log=[{"status": "failed", "detail": result["error"]}],
+            finished_at=timezone.now(),
+        )
+    else:
+        _update_run(
+            status=ScanRun.RunStatus.COMPLETED,
+            current_step="done",
+            total=result.get("scanned", 0),
+            processed=result.get("scanned", 0),
+            sent=result.get("new_replies", 0),
+            failed=len(result.get("errors", [])),
+            log=[{"status": "failed", "detail": e} for e in result.get("errors", [])],
+            finished_at=timezone.now(),
+        )
+
+    return result
+
+
 def _update_client_reply(client, parsed, sentiment):
     """Update a client record after a reply is found."""
     client.has_replied = True
@@ -1001,11 +1238,15 @@ _FOLLOWUP_INTERVALS = [3, 7, 14]
 _MAX_FOLLOWUPS = 3
 
 
-def _generate_followup_email(client, followup_number, sender_profile) -> tuple[str, str]:
+def _generate_followup_email(
+    client, followup_number, sender_profile
+) -> tuple[str, str, dict]:
     """
     Generate a follow-up email using Gemini AI.
     Adapts tone based on which follow-up round this is.
     Falls back to a static template when AI is unavailable.
+
+    Returns (subject, body, meta) — see _generate_ai_email for the meta shape.
     """
     api_key = getattr(settings, "GOOGLE_API_KEY", "")
     company = client.company_name
@@ -1033,10 +1274,13 @@ def _generate_followup_email(client, followup_number, sender_profile) -> tuple[s
             f"180 Degrees Consulting, IIT Kharagpur\n"
             f"https://www.180dc.org/branches/IITKGP\n"
         )
-        return subject, body
+        return (
+            subject,
+            body,
+            {"ai_used": False, "fallback_reason": "GOOGLE_API_KEY not configured", "notes": []},
+        )
 
     try:
-        ai_client = genai.Client(api_key=api_key)
         model_name = getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
 
         parts = client.contact_person.split()
@@ -1063,41 +1307,73 @@ def _generate_followup_email(client, followup_number, sender_profile) -> tuple[s
             f"3. End with the signature: {sender_profile['sender_name']} / {sender_profile['sender_role']} / 180 Degrees Consulting, IIT Kharagpur / https://www.180dc.org/branches/IITKGP\n"
             "4. No markdown formatting.\n"
             "5. Sound warm and human.\n\n"
-            "Output ONLY: subject line on first line, blank line, then full email body."
+            "Respond as JSON matching the given schema: 'subject' is the subject "
+            "line only, 'body' is the full email body."
         )
 
-        response = ai_client.models.generate_content(model=model_name, contents=prompt)
-        content = response.text.strip()
+        result = ai_client.generate_json(
+            api_key=api_key,
+            model_name=model_name,
+            prompt=prompt,
+            response_schema=ai_client.EMAIL_RESPONSE_SCHEMA,
+        )
+        subject, body, notes = ai_client.validate_and_clean(
+            result.get("subject", ""),
+            result.get("body", ""),
+            subject_prefix="Following up",
+        )
+        if not body:
+            raise ValueError("Gemini returned an empty follow-up body")
+        if notes:
+            logger.info(
+                "Gemini follow-up for client %s [%s] needed cleanup: %s",
+                client.pk,
+                company,
+                "; ".join(notes),
+            )
 
-        lines = content.split("\n", 1)
-        if len(lines) == 2:
-            subject = lines[0].strip()
-            body = lines[1].strip()
-        else:
-            subject = f"Following up — 180DC IIT Kharagpur X {company}"
-            body = content
-
-        for prefix in ("SUBJECT:", "Subject:", "subject:"):
-            if subject.startswith(prefix):
-                subject = subject[len(prefix) :].strip()
-
-        return subject, body
+        return subject, body, {"ai_used": True, "fallback_reason": None, "notes": notes}
 
     except Exception as exc:
-        logger.warning("Follow-up generation failed for %s: %s", company, exc)
+        classification = ai_client.classify_gemini_exception(exc)
+        logger.warning(
+            "Follow-up generation failed for %s [%s]: %s", company, classification, exc
+        )
         return (
             f"Following up — 180DC IIT Kharagpur X {company}",
             _build_default_body(client, sender_profile),
+            {"ai_used": False, "fallback_reason": f"{classification}: {exc}", "notes": []},
         )
 
 
-def send_followups(triggered_by_user_id: int | None = None):
+@shared_task(
+    bind=True,
+    name="outreach.send_followups",
+    autoretry_for=(smtplib.SMTPServerDisconnected, ConnectionError, TimeoutError),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 2},
+)
+def send_followups(self, triggered_by_user_id: int | None = None, run_id: int | None = None):
     """
     Send follow-up emails to clients who were pinged but haven't replied,
     respecting follow-up intervals and max follow-up count.
 
-    Returns a summary dict.
+    run_id links to a FollowupRun row for live progress tracking (mirrors
+    send_automated_pings). Returns a summary dict.
     """
+    run = None
+    if run_id:
+        try:
+            run = FollowupRun.objects.get(pk=run_id)
+        except FollowupRun.DoesNotExist:
+            pass
+
+    def _update_run(**kwargs):
+        if run:
+            for k, v in kwargs.items():
+                setattr(run, k, v)
+            run.save(update_fields=list(kwargs.keys()))
+
     intervals = getattr(settings, "FOLLOWUP_INTERVALS_DAYS", _FOLLOWUP_INTERVALS)
     max_followups = getattr(settings, "MAX_FOLLOWUPS", _MAX_FOLLOWUPS)
     now = timezone.now()
@@ -1113,6 +1389,7 @@ def send_followups(triggered_by_user_id: int | None = None):
     sender_profile = _resolve_sender_profile(triggering_user)
     sender_error = _validate_sender_profile(sender_profile)
     if sender_error:
+        _update_run(status=FollowupRun.RunStatus.FAILED, current_step="mailbox setup")
         return {
             "sent": 0,
             "skipped": 0,
@@ -1121,90 +1398,179 @@ def send_followups(triggered_by_user_id: int | None = None):
             "error": sender_error,
         }
 
+    preflight_ok, preflight_msg = _smtp_preflight(sender_profile)
+    if not preflight_ok:
+        logger.warning("send_followups: SMTP preflight failed: %s", preflight_msg)
+        _update_run(status=FollowupRun.RunStatus.FAILED, current_step="mailbox setup")
+        return {
+            "sent": 0,
+            "skipped": 0,
+            "failed": 0,
+            "details": [],
+            "error": preflight_msg,
+        }
+
     # Find clients eligible for follow-up:
     # status = Pinged or Follow Up, haven't exceeded max, and enough time has passed
-    candidates = Client.objects.filter(
-        status__in=[Client.Status.PINGED, Client.Status.FOLLOW_UP],
-        has_replied=False,
-        followup_count__lt=max_followups,
-    ).filter(
-        Q(assigned_to=triggering_user) | Q(assigned_to__isnull=True)
-        if triggering_user
-        else Q()
-    ).exclude(email="")
+    # (uses next_followup_at as the authoritative gate when it's set — see the
+    # per-client check below for why this mirrors admin-editable expectations).
+    candidates = list(
+        Client.objects.filter(
+            status__in=[Client.Status.PINGED, Client.Status.FOLLOW_UP],
+            has_replied=False,
+            followup_count__lt=max_followups,
+        )
+        .filter(
+            Q(assigned_to=triggering_user) | Q(assigned_to__isnull=True)
+            if triggering_user
+            else Q()
+        )
+        .exclude(email="")
+    )
 
     cc_raw = getattr(settings, "OUTREACH_CC_EMAILS", "")
     cc_emails = [e.strip() for e in cc_raw.split(",") if e.strip()]
+
+    _update_run(total=len(candidates))
 
     sent_count = 0
     skipped_count = 0
     failed_count = 0
     results = []
+    run_log = []
 
-    for client in candidates:
-        # Determine how long since last contact
-        last_contact = client.last_contacted_at
-        if not last_contact:
-            continue
+    try:
+        smtp_connection = _open_smtp_connection(sender_profile)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("send_followups: could not open SMTP connection: %s", exc)
+        _update_run(status=FollowupRun.RunStatus.FAILED, current_step="mailbox setup")
+        return {
+            "sent": 0,
+            "skipped": 0,
+            "failed": 0,
+            "details": [],
+            "error": str(exc),
+        }
 
-        followup_num = client.followup_count + 1
-        interval_idx = min(followup_num - 1, len(intervals) - 1)
-        required_gap = timedelta(days=intervals[interval_idx])
+    try:
+        for processed, client in enumerate(candidates):
+            _update_run(
+                current_company=client.company_name,
+                current_step="checking",
+                processed=processed,
+            )
 
-        if (now - last_contact) < required_gap:
-            skipped_count += 1
-            continue
+            # Determine how long since last contact
+            last_contact = client.last_contacted_at
+            if not last_contact:
+                continue
 
-        subject, body = _generate_followup_email(client, followup_num, sender_profile)
-        success, message = _send_single_email(
-            recipient_email=client.email,
-            subject=subject,
-            body=body,
-            cc_emails=cc_emails,
-            sender_profile=sender_profile,
-        )
+            followup_num = client.followup_count + 1
 
-        if success:
-            client.followup_count = followup_num
-            client.last_contacted_at = now
-            client.status = Client.Status.FOLLOW_UP
-
-            # Calculate next follow-up date
-            next_idx = min(followup_num, len(intervals) - 1)
-            if followup_num < max_followups:
-                client.next_followup_at = now + timedelta(days=intervals[next_idx])
+            # next_followup_at, when set, is authoritative — it's admin-editable
+            # (see admin.py) and computed from the same interval schedule below,
+            # so honoring it here means an admin adjusting it actually has an
+            # effect instead of being silently ignored.
+            if client.next_followup_at:
+                due = now >= client.next_followup_at
             else:
-                client.next_followup_at = None
+                interval_idx = min(followup_num - 1, len(intervals) - 1)
+                required_gap = timedelta(days=intervals[interval_idx])
+                due = (now - last_contact) >= required_gap
 
-            client.save(
-                update_fields=[
-                    "followup_count",
-                    "last_contacted_at",
-                    "status",
-                    "next_followup_at",
-                    "updated_at",
-                ]
+            if not due:
+                skipped_count += 1
+                continue
+
+            original_status = client.status
+            if not _claim_client(client.pk, original_status):
+                logger.info(
+                    "Client %s already claimed by another run — skipping.", client.pk
+                )
+                continue
+
+            subject, body, gen_meta = _generate_followup_email(
+                client, followup_num, sender_profile
+            )
+            success, message = _send_single_email(
+                recipient_email=client.email,
+                subject=subject,
+                body=body,
+                cc_emails=cc_emails,
+                sender_profile=sender_profile,
+                connection=smtp_connection,
             )
 
-            ActionLog.objects.create(
-                team_member=triggering_user,
-                client=client,
-                notes=f"Follow-up #{followup_num}. Subject: {subject}",
-            )
+            if success:
+                client.followup_count = followup_num
+                client.last_contacted_at = now
+                client.status = Client.Status.FOLLOW_UP
 
-            sent_count += 1
-            results.append(
-                {
+                # Calculate + persist the next follow-up date immediately so
+                # the field is never stale for an admin inspecting it mid-cycle.
+                next_idx = min(followup_num, len(intervals) - 1)
+                if followup_num < max_followups:
+                    client.next_followup_at = now + timedelta(days=intervals[next_idx])
+                else:
+                    client.next_followup_at = None
+
+                client.save(
+                    update_fields=[
+                        "followup_count",
+                        "last_contacted_at",
+                        "status",
+                        "next_followup_at",
+                        "updated_at",
+                    ]
+                )
+
+                log_note = (
+                    f"Follow-up #{followup_num}."
+                    if gen_meta["ai_used"]
+                    else f"Follow-up #{followup_num} (template fallback)."
+                )
+                ActionLog.objects.create(
+                    team_member=triggering_user,
+                    client=client,
+                    notes=f"{log_note} Subject: {subject}",
+                    ai_used=gen_meta["ai_used"],
+                    ai_failure_reason=gen_meta.get("fallback_reason") or "",
+                    email_body=body,
+                )
+
+                sent_count += 1
+                entry = {
                     "company": client.company_name,
                     "status": "sent",
                     "followup": followup_num,
+                    "ai_used": gen_meta["ai_used"],
+                    "ai_failure_reason": gen_meta.get("fallback_reason"),
                 }
+            else:
+                _release_client(client.pk, original_status)
+                failed_count += 1
+                entry = {"company": client.company_name, "status": "failed", "detail": message}
+
+            results.append(entry)
+            run_log.append(entry)
+            _update_run(
+                processed=processed + 1,
+                sent=sent_count,
+                failed=failed_count,
+                log=run_log,
             )
-        else:
-            failed_count += 1
-            results.append(
-                {"company": client.company_name, "status": "failed", "detail": message}
-            )
+    finally:
+        try:
+            smtp_connection.quit()
+        except Exception:  # noqa: BLE001
+            pass
+
+    _update_run(
+        status=FollowupRun.RunStatus.COMPLETED,
+        current_step="done",
+        current_company="",
+        finished_at=timezone.now(),
+    )
 
     return {
         "sent": sent_count,
@@ -1212,3 +1578,53 @@ def send_followups(triggered_by_user_id: int | None = None):
         "failed": failed_count,
         "details": results,
     }
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation
+# ---------------------------------------------------------------------------
+
+_STUCK_RUN_THRESHOLD_MINUTES = 15
+
+
+@shared_task(name="outreach.reconcile_stuck_runs")
+def reconcile_stuck_runs():
+    """
+    Periodic housekeeping task (see CELERY_BEAT_SCHEDULE in settings.py).
+
+    Two things can go permanently stuck with no automatic recovery:
+      1. A CampaignRun/FollowupRun/ScanRun left at status="running" forever,
+         because the process executing it died (e.g. a Heroku dyno restart
+         mid-batch) before it could mark itself completed/failed.
+      2. A Client left in the transient "Sending" claim status because the
+         process died between a successful SMTP send and the DB commit that
+         would have flipped it to "Pinged" — a residual gap that can't be
+         fully closed for free (no transactional-outbox / provider-side
+         idempotency key available with plain Gmail SMTP).
+
+    This task never guesses at automatic recovery for either case — it only
+    marks stuck runs as failed (so they stop showing as "in progress"
+    forever) and surfaces stuck clients on the reliability dashboard for a
+    human to check whether the email actually went out before resending.
+    """
+    threshold = timezone.now() - timedelta(minutes=_STUCK_RUN_THRESHOLD_MINUTES)
+
+    stuck_runs_marked = 0
+    for model in (CampaignRun, FollowupRun, ScanRun):
+        updated = model.objects.filter(
+            status=RunStatus.RUNNING, started_at__lt=threshold
+        ).update(status=RunStatus.FAILED, finished_at=timezone.now())
+        stuck_runs_marked += updated
+
+    stuck_clients = Client.objects.filter(
+        status=Client.Status.SENDING, updated_at__lt=threshold
+    ).count()
+
+    if stuck_runs_marked or stuck_clients:
+        logger.warning(
+            "reconcile_stuck_runs: marked %d run(s) failed, found %d client(s) stuck in SENDING.",
+            stuck_runs_marked,
+            stuck_clients,
+        )
+
+    return {"stuck_runs_marked": stuck_runs_marked, "stuck_clients": stuck_clients}

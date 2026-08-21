@@ -1,12 +1,15 @@
 from django.contrib import admin
+from django.utils.html import format_html, format_html_join
 
 from .models import (
     ActionLog,
     CampaignRun,
     Client,
     EmailReply,
+    FollowupRun,
     LinkedInReachout,
     OutreachCampaign,
+    ScanRun,
     TeamMember,
 )
 
@@ -75,14 +78,57 @@ class OutreachCampaignAdmin(admin.ModelAdmin):
 
 @admin.register(ActionLog)
 class ActionLogAdmin(admin.ModelAdmin):
-    list_display = ("client", "team_member", "campaign", "emailed_at")
-    list_filter = ("campaign",)
+    list_display = ("client", "team_member", "campaign", "ai_used", "emailed_at")
+    list_filter = ("campaign", "ai_used")
     search_fields = ("client__company_name", "team_member__username")
     readonly_fields = ("emailed_at",)
 
 
+class _RunLogAdminMixin:
+    """Shared admin niceties for CampaignRun/FollowupRun/ScanRun."""
+
+    list_filter = ("status",)
+    readonly_fields = ("started_at", "formatted_log")
+    exclude = ("log",)
+
+    @admin.display(description="AI Fallback Rate")
+    def ai_fallback_rate_display(self, obj):
+        rate = obj.ai_fallback_rate
+        return f"{rate}%" if rate is not None else "—"
+
+    @admin.display(description="SMTP Failure Rate")
+    def smtp_failure_rate_display(self, obj):
+        rate = obj.smtp_failure_rate
+        return f"{rate}%" if rate is not None else "—"
+
+    @admin.display(description="Log")
+    def formatted_log(self, obj):
+        if not obj.log:
+            return "No entries yet."
+        rows = format_html_join(
+            "",
+            "<tr><td style='padding-right:1em'>{}</td>"
+            "<td style='padding-right:1em'>{}</td><td>{}</td></tr>",
+            (
+                (
+                    entry.get("company", ""),
+                    entry.get("status", ""),
+                    entry.get("detail") or entry.get("ai_failure_reason") or "",
+                )
+                for entry in obj.log
+            ),
+        )
+        return format_html(
+            "<table style='border-collapse:collapse'>"
+            "<tr><th style='text-align:left;padding-right:1em'>Company</th>"
+            "<th style='text-align:left;padding-right:1em'>Status</th>"
+            "<th style='text-align:left'>Detail</th></tr>{}</table>",
+            rows,
+        )
+
+
 @admin.register(CampaignRun)
-class CampaignRunAdmin(admin.ModelAdmin):
+class CampaignRunAdmin(_RunLogAdminMixin, admin.ModelAdmin):
     list_display = (
         "pk",
         "status",
@@ -90,11 +136,42 @@ class CampaignRunAdmin(admin.ModelAdmin):
         "processed",
         "sent",
         "failed",
+        "ai_fallback_rate_display",
+        "smtp_failure_rate_display",
         "started_at",
         "finished_at",
     )
-    list_filter = ("status",)
-    readonly_fields = ("started_at",)
+
+
+@admin.register(FollowupRun)
+class FollowupRunAdmin(_RunLogAdminMixin, admin.ModelAdmin):
+    list_display = (
+        "pk",
+        "status",
+        "total",
+        "processed",
+        "sent",
+        "failed",
+        "ai_fallback_rate_display",
+        "smtp_failure_rate_display",
+        "started_at",
+        "finished_at",
+    )
+
+
+@admin.register(ScanRun)
+class ScanRunAdmin(_RunLogAdminMixin, admin.ModelAdmin):
+    list_display = (
+        "pk",
+        "status",
+        "total",
+        "processed",
+        "sent",
+        "failed",
+        "smtp_failure_rate_display",
+        "started_at",
+        "finished_at",
+    )
 
 
 @admin.register(EmailReply)
@@ -123,6 +200,10 @@ class TeamMemberAdmin(admin.ModelAdmin):
         "user__last_name",
         "user__email",
     )
+    # Mailbox app password is never viewable/editable here even though it's
+    # encrypted at rest — password changes must go through the app's own
+    # mailbox_settings/team_edit views, not the Django admin change form.
+    exclude = ("mailbox_app_password",)
 
     @admin.display(description="Email")
     def get_email(self, obj):
