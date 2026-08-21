@@ -127,6 +127,11 @@ CORPUS = [
     ),
 ]
 
+# The stand-in company the corpus fixtures are written around. The side-by-side
+# section swaps this for each real company name so every row is graded against
+# the company it actually names.
+_FIXTURE_COMPANY = "Acme Corp"
+
 _CONTEXT = {
     "company": "Acme Corp",
     "contact_person": "Jordan Lee",
@@ -261,10 +266,17 @@ class Command(BaseCommand):
         )
         self.stdout.write(
             self.style.WARNING(
-                "NOTE: this demo batch deliberately contains one of EVERY known\n"
-                "failure mode so you can see each one. It is NOT a real-world\n"
-                "failure rate — do not quote the ratio below as one. The true rate\n"
-                "for your data is whatever /reliability/ reports after a live run.\n"
+                "NOTE ON WHAT IS REAL HERE:\n"
+                "  Company names  — REAL, read from your contact CSV.\n"
+                "  Email drafts   — CONSTRUCTED for this demo, not captured from\n"
+                "                   any live send. NO EMAIL WAS EVER SENT to these\n"
+                "                   companies. Each draft is graded against the\n"
+                "                   company named on its own row.\n"
+                "  The mix        — deliberately one of EVERY known failure mode so\n"
+                "                   you can see each. NOT a real-world failure rate;\n"
+                "                   do not quote the ratio below as one. Your true\n"
+                "                   rate is whatever /reliability/ reports after a\n"
+                "                   live run.\n"
             )
         )
         header = f"{'#':<3}{'company':<26}{'OLD system delivers':<26}{'NEW system delivers':<26}"
@@ -275,7 +287,15 @@ class Command(BaseCommand):
         old_generic = new_generic = 0
 
         for i, (company, (label, subject, body)) in enumerate(zip(companies, drafts), 1):
-            context = dict(_CONTEXT, company="Acme Corp")
+            # Grade each row against the company actually named on it. The
+            # fixtures are written around a stand-in name, so substitute the
+            # real one into both the draft and the checker's context —
+            # otherwise the company column would be a decorative label while
+            # every row silently graded the same stand-in email, which reads
+            # as "this company was sent a broken email" and is not true.
+            subject = subject.replace(_FIXTURE_COMPANY, company)
+            body = body.replace(_FIXTURE_COMPANY, company)
+            context = dict(_CONTEXT, company=company)
 
             o_subject, o_body, _p = ai_client.validate_and_clean(
                 subject, body, subject_prefix="180DC"
