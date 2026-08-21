@@ -1,0 +1,758 @@
+<title>The Outreach Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    --ground:   #f4f7f4;
+    --surface:  #ffffff;
+    --sunken:   #eaefea;
+    --ink:      #131c17;
+    --muted:    #5d6b62;
+    --faint:    #8a978f;
+    --accent:   #14663f;
+    --accent-2: #1c8f57;
+    --warn:     #9a5d05;
+    --warn-bg:  #fdf3e2;
+    --crit:     #992f24;
+    --crit-bg:  #fcecea;
+    --good-bg:  #e6f2ea;
+    --line:     #d9e2da;
+    --line-hi:  #b9c8bd;
+
+    --measure: 68ch;
+    --step--1: clamp(0.78rem, 0.76rem + 0.1vw, 0.84rem);
+    --step-0:  clamp(1rem, 0.97rem + 0.16vw, 1.09rem);
+    --step-1:  clamp(1.22rem, 1.15rem + 0.34vw, 1.44rem);
+    --step-2:  clamp(1.5rem, 1.36rem + 0.7vw, 2rem);
+    --step-3:  clamp(1.95rem, 1.68rem + 1.35vw, 2.9rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #0c1210;
+      --surface:  #141d18;
+      --sunken:   #101815;
+      --ink:      #dde6e0;
+      --muted:    #93a29a;
+      --faint:    #6b7a72;
+      --accent:   #52b482;
+      --accent-2: #6ec99a;
+      --warn:     #d99a3c;
+      --warn-bg:  #2a2013;
+      --crit:     #e0796c;
+      --crit-bg:  #2c1815;
+      --good-bg:  #16261d;
+      --line:     #22302a;
+      --line-hi:  #35473d;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:   #0c1210;
+    --surface:  #141d18;
+    --sunken:   #101815;
+    --ink:      #dde6e0;
+    --muted:    #93a29a;
+    --faint:    #6b7a72;
+    --accent:   #52b482;
+    --accent-2: #6ec99a;
+    --warn:     #d99a3c;
+    --warn-bg:  #2a2013;
+    --crit:     #e0796c;
+    --crit-bg:  #2c1815;
+    --good-bg:  #16261d;
+    --line:     #22302a;
+    --line-hi:  #35473d;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: var(--step-0);
+    line-height: 1.65;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 clamp(1.1rem, 4vw, 3rem) 6rem;
+  }
+
+  .measure { max-width: var(--measure); }
+
+  h1, h2, h3 {
+    font-family: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+    text-wrap: balance;
+    line-height: 1.12;
+    margin: 0;
+  }
+
+  h1 { font-size: var(--step-3); font-weight: 700; letter-spacing: -0.02em; }
+  h2 { font-size: var(--step-2); font-weight: 700; letter-spacing: -0.015em; }
+  h3 { font-size: var(--step-1); font-weight: 600; letter-spacing: -0.01em; }
+
+  p { margin: 0; }
+
+  a { color: var(--accent); text-underline-offset: 3px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 3px;
+    border-radius: 3px;
+  }
+
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.88em;
+  }
+  code {
+    background: var(--sunken);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: var(--step--1);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--faint);
+    font-weight: 600;
+  }
+
+  /* ---------- masthead ---------- */
+
+  header.masthead {
+    border-bottom: 1px solid var(--line);
+    padding: clamp(3rem, 8vw, 5.5rem) 0 clamp(2rem, 5vw, 3rem);
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .lede {
+    font-size: var(--step-1);
+    color: var(--muted);
+    max-width: 60ch;
+    line-height: 1.5;
+  }
+
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 2.5rem;
+    padding-top: 0.5rem;
+  }
+  .fact { display: flex; flex-direction: column; gap: 0.1rem; padding: 0.6rem 0; }
+  .fact dt { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: var(--step--1);
+             text-transform: uppercase; letter-spacing: 0.12em; color: var(--faint); }
+  .fact dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* ---------- sections ---------- */
+
+  section { padding-top: clamp(3rem, 7vw, 4.75rem); display: flex; flex-direction: column; gap: 1.6rem; }
+
+  .sec-head { display: flex; flex-direction: column; gap: 0.55rem; }
+
+  /* ---------- diagram ---------- */
+
+  .figure {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1.5rem 1.25rem 1.1rem;
+    overflow-x: auto;
+  }
+  .figure svg { display: block; min-width: 760px; width: 100%; height: auto; }
+  .figcaption {
+    color: var(--muted);
+    font-size: var(--step--1);
+    padding-top: 1rem;
+    margin-top: 0.9rem;
+    border-top: 1px solid var(--line);
+  }
+
+  .svg-box { fill: var(--surface); stroke: var(--line-hi); }
+  .svg-box-accent { fill: var(--good-bg); stroke: var(--accent); }
+  .svg-box-warn { fill: var(--warn-bg); stroke: var(--warn); }
+  .svg-box-crit { fill: var(--crit-bg); stroke: var(--crit); }
+  .svg-label { fill: var(--ink); font-family: "IBM Plex Sans", sans-serif; font-size: 13px; font-weight: 500; }
+  .svg-sub { fill: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: 10.5px; }
+  .svg-edge { stroke: var(--line-hi); stroke-width: 1.5; fill: none; }
+  .svg-edge-good { stroke: var(--accent); stroke-width: 1.5; fill: none; }
+  .svg-edge-bad { stroke: var(--crit); stroke-width: 1.5; fill: none; }
+  .svg-edgelabel { font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 600; }
+
+  /* ---------- stage list ---------- */
+
+  .stages { display: flex; flex-direction: column; gap: 0; counter-reset: stage; }
+
+  .stage {
+    display: grid;
+    grid-template-columns: 3.25rem 1fr;
+    gap: 0 1.25rem;
+    padding: 1.5rem 0;
+    border-top: 1px solid var(--line);
+  }
+  .stage:last-child { border-bottom: 1px solid var(--line); }
+
+  .stage-num {
+    counter-increment: stage;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: var(--step--1);
+    font-weight: 600;
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+    padding-top: 0.28rem;
+  }
+  .stage-num::before { content: counter(stage, decimal-leading-zero); }
+
+  .stage-body { display: flex; flex-direction: column; gap: 0.5rem; max-width: var(--measure); }
+  .stage-body h3 { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.6rem; }
+  .stage-body p { color: var(--muted); }
+  .stage-body p strong { color: var(--ink); font-weight: 600; }
+
+  .tag {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+    padding: 0.16rem 0.45rem;
+    border-radius: 3px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .tag-new { color: var(--accent); background: var(--good-bg); }
+  .tag-old { color: var(--faint); }
+
+  /* ---------- cards ---------- */
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(255px, 1fr));
+    gap: 1rem;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 1.15rem 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .card h3 { font-size: 1.02rem; }
+  .card p { color: var(--muted); font-size: 0.94rem; line-height: 1.55; }
+  .card .mono { color: var(--faint); font-size: 0.76rem; letter-spacing: 0.03em; }
+
+  /* ---------- table ---------- */
+
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 0.93rem; }
+  th, td { text-align: left; padding: 0.75rem 1rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--faint); font-weight: 600;
+    background: var(--sunken);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.who { font-weight: 600; white-space: nowrap; }
+  td.what { color: var(--muted); }
+
+  /* ---------- callout ---------- */
+
+  .note {
+    border-left: 3px solid var(--warn);
+    background: var(--warn-bg);
+    padding: 1rem 1.15rem;
+    border-radius: 0 7px 7px 0;
+    display: flex; flex-direction: column; gap: 0.5rem;
+    max-width: var(--measure);
+  }
+  .note .eyebrow { color: var(--warn); }
+  .note p { font-size: 0.94rem; }
+
+  .note-ok { border-left-color: var(--accent); background: var(--good-bg); }
+  .note-ok .eyebrow { color: var(--accent); }
+
+  footer {
+    margin-top: clamp(3.5rem, 8vw, 5rem);
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+    color: var(--faint);
+    font-size: var(--step--1);
+    display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem;
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">180 Degrees Consulting · IIT Kharagpur</p>
+    <h1>How the outreach console works</h1>
+    <p class="lede">
+      A walkthrough of the whole system — what it stores, what runs in the background,
+      and exactly what happens between clicking <em>Run campaign</em> and an email landing
+      in a prospect's inbox.
+    </p>
+    <dl class="facts">
+      <div class="fact"><dt>Built on</dt><dd>Django + Celery</dd></div>
+      <div class="fact"><dt>Writes emails with</dt><dd>Google Gemini</dd></div>
+      <div class="fact"><dt>Sends via</dt><dd>Gmail SMTP</dd></div>
+      <div class="fact"><dt>Reads replies via</dt><dd>Gmail IMAP</dd></div>
+      <div class="fact"><dt>Automated tests</dt><dd>63</dd></div>
+    </dl>
+  </header>
+
+  <!-- ============ THE JOB ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The job</p>
+      <h2>What the tool is for</h2>
+    </div>
+    <p class="measure">
+      Your team needs client companies. Someone exports a list of prospects from Apollo,
+      loads it in, and the console handles everything after that: it researches each company,
+      writes a personal cold email, sends it, chases it up if nobody replies, watches your
+      inbox for responses, and tells you which replies look promising.
+    </p>
+    <p class="measure">
+      The point is that a team member should never have to write a cold email by hand,
+      and should never have to remember to follow up.
+    </p>
+  </section>
+
+  <!-- ============ THE NOUNS ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The data</p>
+      <h2>The things it keeps track of</h2>
+      <p class="measure" style="color:var(--muted)">
+        Seven kinds of record. Everything the tool does is reading or writing one of these.
+      </p>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <span class="mono">CLIENT</span>
+        <h3>A prospect</h3>
+        <p>One person at one company — their name, email, job title, industry, website.
+        Carries a status that moves through <em>Not Contacted → Pinged → Follow Up → Replied →
+        Meeting Set</em>, plus how many times you've chased them and how their last reply felt.</p>
+      </div>
+      <div class="card">
+        <span class="mono">TEAMMEMBER</span>
+        <h3>One of your people</h3>
+        <p>Extends a normal login with their role, the name that signs their emails,
+        and their Gmail address and app password. The password is encrypted before it
+        touches the database.</p>
+      </div>
+      <div class="card">
+        <span class="mono">OUTREACHCAMPAIGN</span>
+        <h3>A campaign</h3>
+        <p>An optional named template that steers the tone of a batch. If you don't pick
+        one, the built-in default is used.</p>
+      </div>
+      <div class="card">
+        <span class="mono">ACTIONLOG</span>
+        <h3>A record of one sent email</h3>
+        <p>Who sent it, to whom, the full text that went out, whether Gemini wrote it or
+        the plain template did — and now its quality score and any defects found.</p>
+      </div>
+      <div class="card">
+        <span class="mono">EMAILREPLY</span>
+        <h3>A reply that came back</h3>
+        <p>The message found in your inbox, plus Gemini's read on it: Positive,
+        Interested, Neutral, Negative, or Not Interested.</p>
+      </div>
+      <div class="card">
+        <span class="mono">COMPANYRESEARCH</span>
+        <h3>What we learned about a company</h3>
+        <p>The Google research summary, saved so it isn't looked up again for a month.
+        Also records whether the search actually found anything.</p>
+      </div>
+      <div class="card">
+        <span class="mono">CAMPAIGNRUN · FOLLOWUPRUN · SCANRUN</span>
+        <h3>A batch in progress</h3>
+        <p>Live progress for one background job — how far through it is, which company
+        it's on, what happened to each contact. This is what the progress bar reads.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ THE THREE JOBS ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The engine</p>
+      <h2>Three jobs run in the background</h2>
+      <p class="measure" style="color:var(--muted)">
+        None of these happen while you wait on a page. You click, the work is handed to a
+        background worker, and you watch a progress bar.
+      </p>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Job</th><th>What it does</th><th>Runs on its own</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="who">Send campaign</td>
+            <td class="what">Finds every contact marked <em>Not Contacted</em> that belongs to you
+            or is unclaimed, writes each a personal email, sends it, marks them <em>Pinged</em>.</td>
+            <td class="what">No — you start it</td>
+          </tr>
+          <tr>
+            <td class="who">Send follow-ups</td>
+            <td class="what">Finds people who were emailed but never replied, and chases them.
+            Up to three times, at 3 days, then 7, then 14. Tone softens each round; the third
+            is a polite last attempt.</td>
+            <td class="what">Every 6 hours</td>
+          </tr>
+          <tr>
+            <td class="who">Scan for replies</td>
+            <td class="what">Logs into your Gmail, looks through the last 90 days for replies from
+            anyone you've contacted, saves them, has Gemini judge the sentiment, and flips
+            that contact to <em>Replied</em>.</td>
+            <td class="what">Every 2 hours</td>
+          </tr>
+          <tr>
+            <td class="who">Tidy up</td>
+            <td class="what">Catches batches that died halfway — a server restart mid-send — and
+            marks them failed instead of leaving them stuck as "running" forever.</td>
+            <td class="what">Every 15 minutes</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <p class="eyebrow">Not switched on yet</p>
+      <p>The automatic schedules above are written and ready, but they need a background
+      worker process running on your host. There's no <code>Procfile</code> in the repo and no
+      worker configured, so right now the three jobs only fire when someone clicks the button.
+      Turning this on needs a host decision, a Redis instance, and a nominated mailbox for the
+      unattended runs to send from.</p>
+    </div>
+  </section>
+
+  <!-- ============ THE PIPELINE ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The core</p>
+      <h2>What happens to one email</h2>
+      <p class="measure" style="color:var(--muted)">
+        This is the sequence every single outbound email goes through. Stages 4 and 5 are new.
+      </p>
+    </div>
+
+    <div class="figure">
+      <svg viewBox="0 0 880 300" role="img" aria-labelledby="flow-title">
+        <title id="flow-title">The email pipeline: research, write, check quality, then send or fall back</title>
+
+        <!-- top row -->
+        <rect class="svg-box" x="8" y="20" width="130" height="52" rx="6"/>
+        <text class="svg-label" x="73" y="42" text-anchor="middle">Pick contact</text>
+        <text class="svg-sub" x="73" y="58" text-anchor="middle">claim it exclusively</text>
+
+        <rect class="svg-box" x="178" y="20" width="130" height="52" rx="6"/>
+        <text class="svg-label" x="243" y="42" text-anchor="middle">Research</text>
+        <text class="svg-sub" x="243" y="58" text-anchor="middle">cached per company</text>
+
+        <rect class="svg-box" x="348" y="20" width="130" height="52" rx="6"/>
+        <text class="svg-label" x="413" y="42" text-anchor="middle">Gemini writes</text>
+        <text class="svg-sub" x="413" y="58" text-anchor="middle">structured reply</text>
+
+        <rect class="svg-box-accent" x="518" y="20" width="140" height="52" rx="6" stroke-width="2"/>
+        <text class="svg-label" x="588" y="42" text-anchor="middle">Quality check</text>
+        <text class="svg-sub" x="588" y="58" text-anchor="middle">score out of 100</text>
+
+        <!-- arrows top row -->
+        <path class="svg-edge" d="M138 46 H172" marker-end="url(#a)"/>
+        <path class="svg-edge" d="M308 46 H342" marker-end="url(#a)"/>
+        <path class="svg-edge" d="M478 46 H512" marker-end="url(#a)"/>
+
+        <!-- pass branch -->
+        <path class="svg-edge-good" d="M658 46 H770 V110" marker-end="url(#ag)"/>
+        <text class="svg-edgelabel" x="700" y="38" fill="var(--accent)">passes</text>
+
+        <!-- fail branch down -->
+        <path class="svg-edge-bad" d="M588 72 V110" marker-end="url(#ab)"/>
+        <text class="svg-edgelabel" x="598" y="94" fill="var(--crit)">fails</text>
+
+        <!-- repair -->
+        <rect class="svg-box-warn" x="503" y="112" width="170" height="52" rx="6"/>
+        <text class="svg-label" x="588" y="134" text-anchor="middle">Ask Gemini to fix it</text>
+        <text class="svg-sub" x="588" y="150" text-anchor="middle">one more try, told what broke</text>
+
+        <!-- recheck -->
+        <rect class="svg-box-accent" x="503" y="192" width="170" height="52" rx="6"/>
+        <text class="svg-label" x="588" y="214" text-anchor="middle">Check again</text>
+        <text class="svg-sub" x="588" y="230" text-anchor="middle">same rules</text>
+        <path class="svg-edge" d="M588 164 V188" marker-end="url(#a)"/>
+
+        <!-- recheck pass -> send -->
+        <path class="svg-edge-good" d="M673 218 H770 V152" marker-end="url(#ag)"/>
+        <text class="svg-edgelabel" x="690" y="212" fill="var(--accent)">fixed</text>
+
+        <!-- recheck fail -> template -->
+        <path class="svg-edge-bad" d="M503 218 H330" marker-end="url(#ab)"/>
+        <text class="svg-edgelabel" x="400" y="212" fill="var(--crit)">still broken</text>
+
+        <rect class="svg-box-warn" x="150" y="192" width="175" height="52" rx="6"/>
+        <text class="svg-label" x="237" y="214" text-anchor="middle">Send plain template</text>
+        <text class="svg-sub" x="237" y="230" text-anchor="middle">safe, not personalised</text>
+
+        <!-- send box -->
+        <rect class="svg-box-accent" x="705" y="112" width="130" height="42" rx="6" stroke-width="2"/>
+        <text class="svg-label" x="770" y="138" text-anchor="middle">Send it</text>
+
+        <!-- record -->
+        <path class="svg-edge" d="M770 154 V262 H445" marker-end="url(#a)"/>
+        <path class="svg-edge" d="M237 244 V262" marker-end="url(#a)"/>
+        <rect class="svg-box" x="290" y="262" width="155" height="30" rx="6"/>
+        <text class="svg-label" x="367" y="281" text-anchor="middle">Record what happened</text>
+
+        <defs>
+          <marker id="a" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 z" fill="var(--line-hi)"/>
+          </marker>
+          <marker id="ag" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 z" fill="var(--accent)"/>
+          </marker>
+          <marker id="ab" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 z" fill="var(--crit)"/>
+          </marker>
+        </defs>
+      </svg>
+      <p class="figcaption">
+        A good email takes the top path and nothing has changed for it. Only a defective
+        draft costs the extra Gemini call, and only a twice-defective one falls back to the
+        plain template. Either way the outcome is written down.
+      </p>
+    </div>
+
+    <div class="stages">
+      <div class="stage">
+        <div class="stage-num"></div>
+        <div class="stage-body">
+          <h3>Claim the contact <span class="tag tag-old">existing</span></h3>
+          <p>The contact is locked before any work starts. If two people run a campaign at the
+          same moment, or someone double-clicks, only one run can grab a given contact — so
+          nobody gets emailed twice. If the send later fails, the lock is released and they're
+          eligible again next time.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num"></div>
+        <div class="stage-body">
+          <h3>Research the company <span class="tag tag-new">changed</span></h3>
+          <p>Gemini searches Google for what the company does, what they've launched, any recent
+          news. <strong>This used to run once per person.</strong> It now runs once per company and
+          the result is kept for 30 days, so two contacts at the same firm cost one search instead of
+          two, and a re-run costs nothing. If the search finds nothing, that's recorded rather
+          than quietly ignored — and it's retried in a few hours rather than being stuck for a month.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num"></div>
+        <div class="stage-body">
+          <h3>Gemini writes the email <span class="tag tag-old">existing</span></h3>
+          <p>Everything known about the contact plus the research goes into a prompt with a
+          sample email to follow. Gemini replies in a fixed format with a subject and a body,
+          so nothing has to be guessed at from raw text. If Gemini is rate-limited or its
+          servers are busy, it's retried up to four times with increasing waits. If the request
+          was rejected outright, it fails immediately rather than wasting retries.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num"></div>
+        <div class="stage-body">
+          <h3>Check the email is fit to send <span class="tag tag-new">new</span></h3>
+          <p>A proofreader step. It scores the draft out of 100 and looks for the things that
+          make an email unsendable: <strong>leftover blanks like [Company] or [specific domain]</strong>,
+          template codes like <code>{{first_name}}</code>, Gemini talking to you instead of the
+          prospect ("Here is the email you requested:"), an email that never names the company,
+          a missing signature, a draft cut off mid-sentence, the wrong person's name in the
+          greeting. This is plain pattern-matching, not another AI call, so it's instant and free.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num"></div>
+        <div class="stage-body">
+          <h3>Give it one chance to fix itself <span class="tag tag-new">new</span></h3>
+          <p>A failed draft isn't thrown away. Gemini gets its own rejected email back with a
+          list of exactly what's wrong and is asked to correct it. If the second attempt passes,
+          it's sent and flagged as repaired. If it fails again, your plain template is sent
+          instead — still a professional email, just not personalised — and the failure is
+          recorded honestly instead of being counted as a success.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num"></div>
+        <div class="stage-body">
+          <h3>Send it <span class="tag tag-old">existing</span></h3>
+          <p>Before a batch starts, the tool logs into your Gmail once to confirm the password
+          works — so a wrong password fails immediately instead of after burning Gemini credits
+          on all fifty contacts. One connection is then reused for the whole batch, with a
+          30-second cutoff so a stalled connection can't hang forever, and a 2-second gap
+          between sends so Gmail doesn't throttle you.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num"></div>
+        <div class="stage-body">
+          <h3>Write down what happened <span class="tag tag-new">expanded</span></h3>
+          <p>The contact flips to <em>Pinged</em> and a log entry is saved: the full email text,
+          whether Gemini or the template wrote it, <strong>and now the quality score, the specific
+          defects found, whether it needed repairing, and whether real research was behind it.</strong>
+          This is what the reliability page reads.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SAFETY ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Guardrails</p>
+      <h2>What protects what</h2>
+      <p class="measure" style="color:var(--muted)">
+        Each of these exists because of a specific way the tool could otherwise go wrong.
+      </p>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Guardrail</th><th>The problem it prevents</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="who">Exclusive claim on a contact</td><td class="what">Two runs emailing the same prospect twice</td></tr>
+          <tr><td class="who">Password check before a batch</td><td class="what">Burning Gemini credits on a batch that can't send</td></tr>
+          <tr><td class="who">30-second connection cutoff</td><td class="what">A stalled Gmail connection hanging the whole run</td></tr>
+          <tr><td class="who">Retry only on temporary faults</td><td class="what">Retrying a wrong password until Gmail locks you out</td></tr>
+          <tr><td class="who">Quality check on the text</td><td class="what">Emails with visible [Company] blanks reaching prospects</td></tr>
+          <tr><td class="who">Work handed to a background worker</td><td class="what">A page timing out halfway through a big batch</td></tr>
+          <tr><td class="who">Task only cleared once finished</td><td class="what">A batch vanishing if the server restarts mid-send</td></tr>
+          <tr><td class="who">Encrypted mailbox passwords</td><td class="what">Gmail passwords sitting readable in the database</td></tr>
+          <tr><td class="who">Passwords hidden from all edit screens</td><td class="what">A real password appearing in the page source</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ SCREENS ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The interface</p>
+      <h2>The screens</h2>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <span class="mono">/</span>
+        <h3>Dashboard</h3>
+        <p>Every contact, filterable by company and status. Where you edit people and move
+        them along the pipeline by hand.</p>
+      </div>
+      <div class="card">
+        <span class="mono">/contacts/import/</span>
+        <h3>Import</h3>
+        <p>Upload an Apollo CSV. Can skip unverified email addresses on the way in.</p>
+      </div>
+      <div class="card">
+        <span class="mono">/campaigns/run/</span>
+        <h3>Run a campaign</h3>
+        <p>Starts a send and hands you a live progress page showing which company it's on
+        and what it's doing — researching, writing, sending.</p>
+      </div>
+      <div class="card">
+        <span class="mono">/followups/</span>
+        <h3>Follow-ups</h3>
+        <p>Same, for chasing people who never replied.</p>
+      </div>
+      <div class="card">
+        <span class="mono">/replies/scan/</span>
+        <h3>Scan replies</h3>
+        <p>Checks Gmail for responses and files them against the right contact.</p>
+      </div>
+      <div class="card">
+        <span class="mono">/client/&lt;id&gt;/thread/</span>
+        <h3>Conversation</h3>
+        <p>Everything sent to and received from one prospect, in order.</p>
+      </div>
+      <div class="card">
+        <span class="mono">/leaderboard/</span>
+        <h3>Leaderboard</h3>
+        <p>Per-person activity — contacts reached, follow-ups sent, LinkedIn outreach logged.</p>
+      </div>
+      <div class="card">
+        <span class="mono">/reliability/</span>
+        <h3>Reliability <span class="tag tag-new">expanded</span></h3>
+        <p>Admin only. How often Gemini failed, how often sending failed, and now how good
+        the emails actually were — average score, how many were repaired, how many were
+        blocked, and how many had real research behind them.</p>
+      </div>
+      <div class="card">
+        <span class="mono">/team/ · /mailbox/</span>
+        <h3>Team &amp; mailbox</h3>
+        <p>Manage people and connect each person's Gmail so emails send from them personally.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ HONEST ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Worth knowing</p>
+      <h2>Three honest caveats</h2>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:1rem">
+      <div class="note">
+        <p class="eyebrow">The schedules aren't live</p>
+        <p>Automatic follow-ups and reply scanning are written and tested, but need a
+        background worker running on your host. Until that's set up, they only run when
+        someone clicks.</p>
+      </div>
+      <div class="note">
+        <p class="eyebrow">The research cache saves nothing on your current list</p>
+        <p>Your Apollo export has 25 contacts across 25 different companies, so there's
+        nothing to skip on a first run. The saving shows up on re-runs, and on lists with
+        several people at the same firm.</p>
+      </div>
+      <div class="note">
+        <p class="eyebrow">Nobody knows the real repair rate yet</p>
+        <p>The repair step is proven to work, but how often Gemini actually fixes its own
+        draft can only be measured on a live batch. Run one real campaign and the reliability
+        page will show the true split between repaired and blocked.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Anmol-Maheshwari30/CNS_App</span>
+    <span>Merged in #1 and #2</span>
+    <span>63 automated tests</span>
+  </footer>
+
+</div>
