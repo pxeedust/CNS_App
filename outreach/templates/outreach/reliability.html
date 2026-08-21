@@ -8,7 +8,7 @@
 <div class="d-flex align-items-center justify-content-between mb-4">
   <div>
     <h3 class="fw-bold mb-0"><i class="bi bi-shield-check me-2" style="color: var(--dc-green);"></i>Sending Reliability</h3>
-    <p class="text-muted mb-0 small">Gemini fallback rate, SMTP failures, and stuck sends over the last {{ window_days }} days — admin view only</p>
+    <p class="text-muted mb-0 small">Gemini fallback rate, email content quality, SMTP failures, and stuck sends over the last {{ window_days }} days — admin view only</p>
   </div>
   <a href="{% url 'outreach:dashboard' %}" class="btn btn-outline-dc-green">
     <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
@@ -57,6 +57,64 @@
 </div>
 {% endif %}
 
+{% if emails_saved %}
+<div class="alert alert-success">
+  <i class="bi bi-shield-fill-check me-2"></i>
+  The content quality gate caught <strong>{{ emails_saved }}</strong> defective email(s) in this window
+  &mdash; {{ repaired_count }} repaired and re-sent properly, {{ quality_blocked_count }} replaced by the safe
+  template. Before the gate existed, every one of these would have reached a real prospect with visible
+  defects such as unfilled <code>[Company]</code> placeholders.
+</div>
+{% endif %}
+
+<h6 class="fw-bold text-uppercase text-muted small mt-4 mb-3">
+  <i class="bi bi-file-earmark-text me-1"></i>Email Content Quality
+</h6>
+<div class="row g-4 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="p-3 rounded-3 bg-light text-center">
+      <div class="display-6 fw-bold {% if avg_quality_score < 70 %}text-danger{% elif avg_quality_score < 90 %}text-warning{% else %}text-success{% endif %}">
+        {% if avg_quality_score != None %}{{ avg_quality_score }}{% else %}&mdash;{% endif %}
+      </div>
+      <div class="text-muted small mt-1">Avg Quality Score<br><span class="text-secondary">({{ scored_count }} scored)</span></div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="p-3 rounded-3 bg-light text-center">
+      <div class="display-6 fw-bold text-primary">{{ repaired_count }}</div>
+      <div class="text-muted small mt-1">Repaired by Retry</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="p-3 rounded-3 bg-light text-center">
+      <div class="display-6 fw-bold text-warning">{{ quality_blocked_count }}</div>
+      <div class="text-muted small mt-1">Blocked as Unsendable</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="p-3 rounded-3 bg-light text-center">
+      <div class="display-6 fw-bold {% if grounded_rate < 50 %}text-warning{% else %}text-success{% endif %}">
+        {% if grounded_rate != None %}{{ grounded_rate }}%{% else %}&mdash;{% endif %}
+      </div>
+      <div class="text-muted small mt-1">Written With Live Research<br><span class="text-secondary">({{ grounded_count }}/{{ ai_count }})</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="alert alert-light border d-flex align-items-center">
+  <i class="bi bi-database-check me-2 fs-5" style="color: var(--dc-green);"></i>
+  <div class="small mb-0">
+    <strong>Research cache:</strong> {{ research_total }} compan{{ research_total|pluralize:"y,ies" }} cached,
+    reused <strong>{{ research_reuses }}</strong> time{{ research_reuses|pluralize }} &mdash; that is
+    {{ search_calls_saved }} grounded Gemini search call{{ search_calls_saved|pluralize }} not made, and the
+    matching per-email latency saved.
+    {% if research_ungrounded %}
+      <span class="text-warning-emphasis">{{ research_ungrounded }} compan{{ research_ungrounded|pluralize:"y,ies" }}
+      returned no research &mdash; their emails will read generically until the search succeeds.</span>
+    {% endif %}
+  </div>
+</div>
+
 <div class="card shadow-sm border-0 mb-4">
   <div class="card-header fw-semibold py-3" style="background: var(--dc-green-light); border-bottom: 2px solid var(--dc-green);">
     <i class="bi bi-list-check me-2" style="color: var(--dc-green);"></i>Recent Runs
@@ -76,6 +134,9 @@
             <th class="text-center">Failed</th>
             <th class="text-center">AI Fallback Rate</th>
             <th class="text-center">SMTP Failure Rate</th>
+            <th class="text-center">Avg Quality</th>
+            <th class="text-center">Repaired</th>
+            <th class="text-center">Blocked</th>
           </tr>
         </thead>
         <tbody>
@@ -98,6 +159,9 @@
             <td class="text-center text-danger">{{ run.failed }}</td>
             <td class="text-center">{% if run.ai_fallback_rate != None %}{{ run.ai_fallback_rate }}%{% else %}—{% endif %}</td>
             <td class="text-center">{% if run.smtp_failure_rate != None %}{{ run.smtp_failure_rate }}%{% else %}—{% endif %}</td>
+            <td class="text-center">{% if run.avg_quality_score != None %}{{ run.avg_quality_score }}{% else %}—{% endif %}</td>
+            <td class="text-center">{% if run.repaired_count %}<span class="badge text-bg-primary">{{ run.repaired_count }}</span>{% else %}—{% endif %}</td>
+            <td class="text-center">{% if run.quality_blocked_count %}<span class="badge text-bg-warning text-dark">{{ run.quality_blocked_count }}</span>{% else %}—{% endif %}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -139,6 +203,56 @@
     </div>
     {% else %}
     <div class="p-4 text-muted">No fallbacks in this window — Gemini has been reliable.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card shadow-sm border-0 mt-4">
+  <div class="card-header fw-semibold py-3" style="background: #f8f9fa; border-bottom: 2px solid #6c757d;">
+    <i class="bi bi-clipboard2-check me-2 text-muted"></i>Recent Content-Quality Events
+  </div>
+  <div class="card-body p-0">
+    {% if recent_quality_events %}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead style="background-color: var(--dc-charcoal); color: #fff;">
+          <tr>
+            <th class="ps-4">Client</th>
+            <th>When</th>
+            <th class="text-center">Score</th>
+            <th class="text-center">Outcome</th>
+            <th>Defects Detected</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for log in recent_quality_events %}
+          <tr>
+            <td class="ps-4">{{ log.client.company_name }}</td>
+            <td class="small text-muted">{{ log.emailed_at }}</td>
+            <td class="text-center fw-semibold {% if log.quality_score < 70 %}text-danger{% elif log.quality_score < 90 %}text-warning{% else %}text-success{% endif %}">{{ log.quality_score }}</td>
+            <td class="text-center">
+              {% if log.was_repaired %}
+                <span class="badge text-bg-primary">Repaired</span>
+              {% elif not log.ai_used %}
+                <span class="badge text-bg-warning text-dark">Blocked</span>
+              {% else %}
+                <span class="badge text-bg-secondary">Sent w/ warnings</span>
+              {% endif %}
+            </td>
+            <td class="small">
+              {% for issue in log.quality_issues %}
+                <span class="badge {% if issue.severity == 'blocker' %}text-bg-danger{% else %}text-bg-light text-dark border{% endif %} me-1">{{ issue.code }}</span>
+              {% empty %}
+                <span class="text-muted">—</span>
+              {% endfor %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-4 text-muted">No content-quality issues recorded — every AI email passed the gate cleanly.</div>
     {% endif %}
   </div>
 </div>

@@ -22,6 +22,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from . import quality
+
 logger = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTION = (
@@ -234,3 +236,94 @@ def validate_and_clean(subject: str, body: str, *, subject_prefix: str | None = 
         )
 
     return subject, body, problems
+
+
+# ---------------------------------------------------------------------------
+# Quality-gated generation
+# ---------------------------------------------------------------------------
+
+
+def generate_checked_email(
+    *,
+    api_key: str,
+    model_name: str,
+    prompt: str,
+    quality_context: dict,
+    max_repair_attempts: int = 1,
+):
+    """
+    Generate an email, run it through the content-quality gate, and — when it
+    fails on a blocking defect — send the model its own rejected draft plus
+    the itemised reasons and ask for a corrected version.
+
+    This closes the gap left by the delivery-reliability work: previously a
+    structurally-valid response was sent regardless of whether its text was
+    fit for a prospect's inbox, so an email reading "[Company]'s work in
+    [specific domain]" went out and was recorded as an AI success.
+
+    A repair costs one extra Gemini call and only happens on the drafts that
+    would otherwise have been unsendable, so the common (clean) path is
+    unchanged in both latency and quota.
+
+    Returns (subject, body, report, meta) where meta carries:
+        attempts        — how many generation calls were made (1 or 2)
+        repaired        — a repair pass ran and the result then passed
+        gate_passed     — final draft has no blocking defects
+        quality_score   — 0-100 score of the final draft
+        quality_issues  — JSON-serialisable issue list of the final draft
+
+    Raises on API failure (callers keep their existing fallback behaviour).
+    When the final draft still has blockers, it is returned with
+    gate_passed=False — the caller must not send it and should fall back to
+    the static template, which is the honest outcome and is now recorded as
+    such instead of shipping a broken email.
+    """
+    attempts = 0
+    current_prompt = prompt
+    subject = body = ""
+    report = None
+
+    for attempt_index in range(max_repair_attempts + 1):
+        result = generate_json(
+            api_key=api_key,
+            model_name=model_name,
+            prompt=current_prompt,
+            response_schema=EMAIL_RESPONSE_SCHEMA,
+        )
+        attempts += 1
+
+        subject, body, _notes = validate_and_clean(
+            result.get("subject", ""),
+            result.get("body", ""),
+            subject_prefix=quality_context.get("subject_prefix") or None,
+        )
+        report = quality.check_email(
+            subject,
+            body,
+            company=quality_context.get("company", ""),
+            contact_person=quality_context.get("contact_person", ""),
+            sender_name=quality_context.get("sender_name", ""),
+            subject_prefix=quality_context.get("subject_prefix", ""),
+            fallback_body=quality_context.get("fallback_body", ""),
+        )
+
+        if report.passed:
+            break
+
+        if attempt_index < max_repair_attempts:
+            logger.warning(
+                "Quality gate rejected draft for %s (score=%d): %s — requesting repair.",
+                quality_context.get("company", "?"),
+                report.score,
+                report.summary(),
+            )
+            current_prompt = quality.build_repair_prompt(prompt, subject, body, report)
+
+    meta = {
+        "attempts": attempts,
+        "repaired": attempts > 1 and report.passed,
+        "gate_passed": report.passed,
+        "quality_score": report.score,
+        "quality_issues": report.as_list(),
+    }
+    return subject, body, report, meta

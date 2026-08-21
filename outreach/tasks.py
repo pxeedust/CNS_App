@@ -33,6 +33,7 @@ from .models import (
     ActionLog,
     CampaignRun,
     Client,
+    CompanyResearch,
     EmailReply,
     FollowupRun,
     OutreachCampaign,
@@ -287,6 +288,22 @@ https://www.180dc.org/branches/IITKGP
 """
 
 
+# Baseline generation metadata. Every generation path returns this shape, so
+# callers can record telemetry without defensive .get() chains everywhere.
+_EMPTY_GEN_META = {
+    "ai_used": False,
+    "fallback_reason": None,
+    "notes": [],
+    "quality_score": None,
+    "quality_issues": [],
+    "was_repaired": False,
+    "quality_blocked": False,
+    "research_grounded": False,
+    "research_cache_hit": False,
+    "ai_calls": 0,
+}
+
+
 def _build_default_body(client, sender_profile):
     """Render the built-in fallback email body for a client."""
     parts = client.contact_person.split()
@@ -336,6 +353,69 @@ def _google_search_snippets(api_key, model_name, company, industry, website):
         return ""
 
 
+def _get_company_research(api_key, model_name, company, industry, website):
+    """
+    Return (summary, grounded, cache_hit) for a company, reusing a cached
+    research summary when one exists and is still fresh.
+
+    The grounding call was previously made once per *contact*. Two contacts at
+    the same company meant two identical grounded searches, and re-running a
+    campaign paid for all of them again — the most expensive and slowest part
+    of generating each email, repeated for no benefit. Research about a
+    company doesn't change hour to hour, so it is cached per company for
+    RESEARCH_CACHE_TTL_DAYS.
+
+    A cached *ungrounded* result (the search returned nothing) is deliberately
+    not reused for long: it is re-attempted once it ages past a much shorter
+    window, since an empty result is usually transient and reusing it would
+    lock the company into permanently generic emails.
+    """
+    if not company:
+        return "", False, False
+
+    ttl_days = getattr(settings, "RESEARCH_CACHE_TTL_DAYS", 30)
+    empty_ttl_hours = getattr(settings, "RESEARCH_EMPTY_RETRY_HOURS", 6)
+    key = CompanyResearch.make_key(company)
+    if not key:
+        return "", False, False
+
+    now = timezone.now()
+    cached = CompanyResearch.objects.filter(company_key=key).first()
+    if cached:
+        age = now - cached.refreshed_at
+        fresh = (
+            age < timedelta(days=ttl_days)
+            if cached.grounded
+            else age < timedelta(hours=empty_ttl_hours)
+        )
+        if fresh:
+            CompanyResearch.objects.filter(pk=cached.pk).update(
+                hit_count=cached.hit_count + 1
+            )
+            logger.info(
+                "Research cache HIT for %s (grounded=%s, age=%s).",
+                company,
+                cached.grounded,
+                age,
+            )
+            return cached.summary, cached.grounded, True
+
+    summary = _google_search_snippets(api_key, model_name, company, industry, website)
+    grounded = bool(summary.strip())
+
+    CompanyResearch.objects.update_or_create(
+        company_key=key,
+        defaults={
+            "company_name": company,
+            "summary": summary,
+            "grounded": grounded,
+            "refreshed_at": now,
+        },
+    )
+    logger.info("Research cache MISS for %s (grounded=%s) — stored.", company, grounded)
+    return summary, grounded, False
+
+
 def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str, dict]:
     """
     Generate a fully personalised subject + body for *client* using Gemini.
@@ -359,7 +439,10 @@ def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str,
         return (
             subject,
             _build_default_body(client, sender_profile),
-            {"ai_used": False, "fallback_reason": "GOOGLE_API_KEY not configured", "notes": []},
+            dict(
+                _EMPTY_GEN_META,
+                fallback_reason="GOOGLE_API_KEY not configured",
+            ),
         )
 
     try:
@@ -377,8 +460,8 @@ def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str,
         location_parts = [p for p in [client.city, client.state, client.country] if p]
         location = ", ".join(location_parts)
 
-        # -- Step 1: Research the company via Google Search grounding ----------
-        search_snippets = _google_search_snippets(
+        # -- Step 1: Research the company (cached per company, not per contact)
+        search_snippets, research_grounded, research_cache_hit = _get_company_research(
             api_key, model_name, company, industry, website
         )
 
@@ -448,29 +531,79 @@ def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str,
             "(greeting through signature)."
         )
 
-        result = ai_client.generate_json(
+        # -- Step 3: Generate, then gate the *content* before it can be sent --
+        fallback_body = _build_default_body(client, sender_profile)
+        subject_raw, ai_body, report, gate_meta = ai_client.generate_checked_email(
             api_key=api_key,
             model_name=model_name,
             prompt=prompt,
-            response_schema=ai_client.EMAIL_RESPONSE_SCHEMA,
+            quality_context={
+                "company": company,
+                "contact_person": client.contact_person,
+                "sender_name": consultant_name,
+                "subject_prefix": "180DC",
+                "fallback_body": fallback_body,
+            },
+            max_repair_attempts=getattr(settings, "AI_MAX_REPAIR_ATTEMPTS", 1),
         )
-        subject_raw, ai_body, notes = ai_client.validate_and_clean(
-            result.get("subject", ""),
-            result.get("body", ""),
-            subject_prefix="180DC",
+
+        base_meta = dict(
+            _EMPTY_GEN_META,
+            notes=[i["code"] for i in gate_meta["quality_issues"]],
+            quality_score=gate_meta["quality_score"],
+            quality_issues=gate_meta["quality_issues"],
+            was_repaired=gate_meta["repaired"],
+            research_grounded=research_grounded,
+            research_cache_hit=research_cache_hit,
+            ai_calls=gate_meta["attempts"],
         )
-        if not ai_body:
-            raise ValueError("Gemini returned an empty email body")
-        if notes:
-            logger.info(
-                "Gemini email for client %s [%s] needed cleanup: %s",
+
+        if not gate_meta["gate_passed"]:
+            # The draft is unsendable (unfilled [Company] placeholders, missing
+            # signature, assistant commentary...) and the repair pass could not
+            # fix it. Before this gate existed the broken text was sent anyway
+            # and logged as an AI success; now it is replaced by the safe
+            # template and recorded honestly as a quality failure.
+            blockers = ", ".join(i.code for i in report.blockers)
+            logger.error(
+                "Quality gate BLOCKED the AI email for client %s [%s] after %d attempt(s) "
+                "(score=%d, blockers=%s) — sending the static template instead.",
                 client.pk,
                 company,
-                "; ".join(notes),
+                gate_meta["attempts"],
+                gate_meta["quality_score"],
+                blockers,
+            )
+            return (
+                _DEFAULT_SUBJECT_TPL.format(company=client.company_name),
+                fallback_body,
+                dict(
+                    base_meta,
+                    ai_used=False,
+                    quality_blocked=True,
+                    fallback_reason=f"quality_gate_failed: {blockers}",
+                ),
             )
 
-        logger.info("Gemini generated email for client %s [%s].", client.pk, company)
-        return subject_raw, ai_body, {"ai_used": True, "fallback_reason": None, "notes": notes}
+        if gate_meta["repaired"]:
+            logger.info(
+                "Quality gate repaired the AI email for client %s [%s] "
+                "(final score=%d).",
+                client.pk,
+                company,
+                gate_meta["quality_score"],
+            )
+        elif report.warnings:
+            logger.info(
+                "Gemini email for client %s [%s] sent with warnings: %s",
+                client.pk,
+                company,
+                report.summary(),
+            )
+        else:
+            logger.info("Gemini generated email for client %s [%s].", client.pk, company)
+
+        return subject_raw, ai_body, dict(base_meta, ai_used=True)
 
     except Exception as exc:
         classification = ai_client.classify_gemini_exception(exc)
@@ -485,7 +618,7 @@ def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str,
         return (
             subject,
             _build_default_body(client, sender_profile),
-            {"ai_used": False, "fallback_reason": f"{classification}: {exc}", "notes": []},
+            dict(_EMPTY_GEN_META, fallback_reason=f"{classification}: {exc}"),
         )
 
 
@@ -671,6 +804,10 @@ def send_automated_pings(
                     ai_used=gen_meta["ai_used"],
                     ai_failure_reason=gen_meta.get("fallback_reason") or "",
                     email_body=body,
+                    quality_score=gen_meta.get("quality_score"),
+                    quality_issues=gen_meta.get("quality_issues") or [],
+                    was_repaired=gen_meta.get("was_repaired", False),
+                    research_grounded=gen_meta.get("research_grounded", False),
                 )
 
                 sent_count += 1
@@ -681,6 +818,11 @@ def send_automated_pings(
                         "status": "sent",
                         "ai_used": gen_meta["ai_used"],
                         "ai_failure_reason": gen_meta.get("fallback_reason"),
+                        "quality_score": gen_meta.get("quality_score"),
+                        "was_repaired": gen_meta.get("was_repaired", False),
+                        "quality_blocked": gen_meta.get("quality_blocked", False),
+                        "research_grounded": gen_meta.get("research_grounded", False),
+                        "research_cache_hit": gen_meta.get("research_cache_hit", False),
                     }
                 )
                 logger.info(
@@ -1277,7 +1419,7 @@ def _generate_followup_email(
         return (
             subject,
             body,
-            {"ai_used": False, "fallback_reason": "GOOGLE_API_KEY not configured", "notes": []},
+            dict(_EMPTY_GEN_META, fallback_reason="GOOGLE_API_KEY not configured"),
         )
 
     try:
@@ -1311,28 +1453,53 @@ def _generate_followup_email(
             "line only, 'body' is the full email body."
         )
 
-        result = ai_client.generate_json(
+        fallback_body = _build_default_body(client, sender_profile)
+        subject, body, report, gate_meta = ai_client.generate_checked_email(
             api_key=api_key,
             model_name=model_name,
             prompt=prompt,
-            response_schema=ai_client.EMAIL_RESPONSE_SCHEMA,
+            quality_context={
+                "company": company,
+                "contact_person": client.contact_person,
+                "sender_name": sender_profile["sender_name"],
+                "subject_prefix": "Following up",
+                "fallback_body": fallback_body,
+            },
+            max_repair_attempts=getattr(settings, "AI_MAX_REPAIR_ATTEMPTS", 1),
         )
-        subject, body, notes = ai_client.validate_and_clean(
-            result.get("subject", ""),
-            result.get("body", ""),
-            subject_prefix="Following up",
+
+        base_meta = dict(
+            _EMPTY_GEN_META,
+            notes=[i["code"] for i in gate_meta["quality_issues"]],
+            quality_score=gate_meta["quality_score"],
+            quality_issues=gate_meta["quality_issues"],
+            was_repaired=gate_meta["repaired"],
+            ai_calls=gate_meta["attempts"],
         )
-        if not body:
-            raise ValueError("Gemini returned an empty follow-up body")
-        if notes:
-            logger.info(
-                "Gemini follow-up for client %s [%s] needed cleanup: %s",
+
+        if not gate_meta["gate_passed"]:
+            blockers = ", ".join(i.code for i in report.blockers)
+            logger.error(
+                "Quality gate BLOCKED the follow-up for client %s [%s] after %d attempt(s) "
+                "(score=%d, blockers=%s) — sending the static template instead.",
                 client.pk,
                 company,
-                "; ".join(notes),
+                gate_meta["attempts"],
+                gate_meta["quality_score"],
+                blockers,
+            )
+            return (
+                f"Following up — 180DC IIT Kharagpur X {company}",
+                fallback_body,
+                dict(
+                    base_meta,
+                    ai_used=False,
+                    quality_blocked=True,
+                    fallback_reason=f"quality_gate_failed: {blockers}",
+                ),
             )
 
-        return subject, body, {"ai_used": True, "fallback_reason": None, "notes": notes}
+        return subject, body, dict(base_meta, ai_used=True)
 
     except Exception as exc:
         classification = ai_client.classify_gemini_exception(exc)
@@ -1342,7 +1509,7 @@ def _generate_followup_email(
         return (
             f"Following up — 180DC IIT Kharagpur X {company}",
             _build_default_body(client, sender_profile),
-            {"ai_used": False, "fallback_reason": f"{classification}: {exc}", "notes": []},
+            dict(_EMPTY_GEN_META, fallback_reason=f"{classification}: {exc}"),
         )
 
 
@@ -1536,6 +1703,10 @@ def send_followups(self, triggered_by_user_id: int | None = None, run_id: int | 
                     ai_used=gen_meta["ai_used"],
                     ai_failure_reason=gen_meta.get("fallback_reason") or "",
                     email_body=body,
+                    quality_score=gen_meta.get("quality_score"),
+                    quality_issues=gen_meta.get("quality_issues") or [],
+                    was_repaired=gen_meta.get("was_repaired", False),
+                    research_grounded=gen_meta.get("research_grounded", False),
                 )
 
                 sent_count += 1
@@ -1545,6 +1716,10 @@ def send_followups(self, triggered_by_user_id: int | None = None, run_id: int | 
                     "followup": followup_num,
                     "ai_used": gen_meta["ai_used"],
                     "ai_failure_reason": gen_meta.get("fallback_reason"),
+                    "quality_score": gen_meta.get("quality_score"),
+                    "was_repaired": gen_meta.get("was_repaired", False),
+                    "quality_blocked": gen_meta.get("quality_blocked", False),
+                    "research_grounded": gen_meta.get("research_grounded", False),
                 }
             else:
                 _release_client(client.pk, original_status)

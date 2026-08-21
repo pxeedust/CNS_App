@@ -182,6 +182,21 @@ OUTREACH_CC_EMAILS = os.getenv("OUTREACH_CC_EMAILS", "")  # comma-separated
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
+# How many corrective re-generations to attempt when a draft fails the content
+# quality gate (outreach/quality.py) — e.g. it came back with the sample
+# email's "[Company]" / "[specific domain]" placeholders left unfilled.
+# Each repair costs one extra Gemini call and only runs on drafts that would
+# otherwise be unsendable. Set to 0 to disable repair (a failed draft then
+# falls straight through to the safe static template).
+AI_MAX_REPAIR_ATTEMPTS = int(os.getenv("AI_MAX_REPAIR_ATTEMPTS", "1"))
+
+# Google-Search-grounded company research is cached per company rather than
+# re-run per contact. A successful summary is reused for this many days; an
+# empty one is retried much sooner, since an empty result is usually transient
+# and reusing it would lock a company into permanently generic emails.
+RESEARCH_CACHE_TTL_DAYS = int(os.getenv("RESEARCH_CACHE_TTL_DAYS", "30"))
+RESEARCH_EMPTY_RETRY_HOURS = int(os.getenv("RESEARCH_EMPTY_RETRY_HOURS", "6"))
+
 # ---------------------------------------------------------------------------
 # IMAP (for scanning replies)
 # ---------------------------------------------------------------------------

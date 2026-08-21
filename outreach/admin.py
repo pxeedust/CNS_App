@@ -5,6 +5,7 @@ from .models import (
     ActionLog,
     CampaignRun,
     Client,
+    CompanyResearch,
     EmailReply,
     FollowupRun,
     LinkedInReachout,
@@ -78,10 +79,33 @@ class OutreachCampaignAdmin(admin.ModelAdmin):
 
 @admin.register(ActionLog)
 class ActionLogAdmin(admin.ModelAdmin):
-    list_display = ("client", "team_member", "campaign", "ai_used", "emailed_at")
-    list_filter = ("campaign", "ai_used")
+    list_display = (
+        "client",
+        "team_member",
+        "campaign",
+        "ai_used",
+        "quality_score",
+        "was_repaired",
+        "research_grounded",
+        "emailed_at",
+    )
+    list_filter = ("campaign", "ai_used", "was_repaired", "research_grounded")
     search_fields = ("client__company_name", "team_member__username")
     readonly_fields = ("emailed_at",)
+
+
+@admin.register(CompanyResearch)
+class CompanyResearchAdmin(admin.ModelAdmin):
+    """
+    Lets an admin inspect (and, when a summary has gone stale or wrong,
+    delete) the cached grounded-research summaries that personalise emails.
+    Deleting a row simply forces a fresh search on the next send.
+    """
+
+    list_display = ("company_name", "grounded", "hit_count", "refreshed_at")
+    list_filter = ("grounded",)
+    search_fields = ("company_name", "company_key")
+    readonly_fields = ("company_key", "hit_count", "created_at")
 
 
 class _RunLogAdminMixin:
