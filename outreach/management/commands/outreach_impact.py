@@ -423,6 +423,59 @@ class Command(BaseCommand):
             f"(={getattr(settings, 'RESEARCH_CACHE_TTL_DAYS', 30)})."
         )
 
+    def _section_email_proof(self):
+        """
+        Print the two emails in full. Everything else here is counts and
+        verdicts; this is the one place you can read the actual text that
+        would have reached a prospect, which is what makes the problem
+        obvious to someone who does not read code.
+        """
+        self._h1("0. THE EMAIL ITSELF — what the prospect actually receives")
+
+        _label, subject, bad_body = CORPUS[1]
+        o_subject, o_body, old_problems = ai_client.validate_and_clean(
+            subject, bad_body, subject_prefix="180DC"
+        )
+        report = quality.check_email(o_subject, o_body, **_CONTEXT)
+
+        self._h2("BEFORE — delivered to the prospect, logged as an AI success")
+        self.stdout.write(f"  To      : jordan@acme.test")
+        self.stdout.write(f"  Subject : {o_subject}")
+        self.stdout.write("")
+        for line in o_body.splitlines():
+            self.stdout.write(self.style.ERROR(f"  {line}"))
+        self.stdout.write("")
+        self.stdout.write(
+            self.style.ERROR(
+                f"  The old checker was asked about this exact email and "
+                f"reported: {old_problems}"
+            )
+        )
+        self.stdout.write(
+            self.style.ERROR(
+                "  An empty list means no problems found. It was sent as-is."
+            )
+        )
+
+        self._h2("AFTER — the same Gemini reply, run through the new check")
+        self.stdout.write(f"  Quality score : {report.score} / 100")
+        self.stdout.write(f"  Verdict       : {'PASS' if report.passed else 'BLOCKED'}")
+        self.stdout.write("")
+        for issue in report.issues:
+            marker = "BLOCKER" if issue.severity == "blocker" else "warning"
+            style = self.style.ERROR if issue.severity == "blocker" else self.style.WARNING
+            self.stdout.write(style(f"  [{marker}] {issue.code}"))
+            for wrapped in _wrap(issue.detail, 70):
+                self.stdout.write(f"            {wrapped}")
+        self.stdout.write("")
+        self.stdout.write(
+            self.style.SUCCESS(
+                "  Gemini is asked to fix these. If it cannot, the plain template\n"
+                "  is sent instead and the failure is recorded — the prospect never\n"
+                "  sees the text above."
+            )
+        )
+
     def _section_telemetry(self):
         self._h1("5. TELEMETRY — what is recorded now that was not before")
         rows = [
@@ -443,6 +496,7 @@ class Command(BaseCommand):
     # -- entrypoint ---------------------------------------------------------
 
     def handle(self, *args, **options):
+        self._section_email_proof()
         self._section_gate()
         self._section_side_by_side(options["csv"], options["emails"])
         self._section_repair()
@@ -467,6 +521,13 @@ def _norm(name):
     from outreach.models import CompanyResearch
 
     return CompanyResearch.make_key(name)
+
+
+def _wrap(text, width):
+    """Wrap a defect explanation for terminal display."""
+    import textwrap
+
+    return textwrap.wrap(text, width=width) or [""]
 
 
 def _load_companies(csv_path):
