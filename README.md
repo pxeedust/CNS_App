@@ -2,9 +2,9 @@
 
 A Django application for personalized email outreach, automated follow-ups, reply detection, sentiment analysis, and team activity tracking.
 
-## What your teammate needs
+## Requirements
 
-For local testing, they need:
+Local development requires:
 
 - Python 3.12 or newer
 - A Gemini API key
@@ -16,7 +16,7 @@ Redis is **not required for the first local test**. The example development conf
 ## Clone and install
 
 ```bash
-git clone <your-github-repository-url>
+git clone <repository-url>
 cd CNS_App
 python -m venv .venv
 ```
@@ -78,7 +78,7 @@ TIME_ZONE=Asia/Kolkata
 DATABASE_URL=sqlite:///db.sqlite3
 DATABASE_SSL_REQUIRE=False
 
-GEMINI_API_KEY=<teammate-gemini-key>
+GEMINI_API_KEY=<gemini-api-key>
 GEMINI_MODEL=gemini-2.5-flash
 GEMINI_REQUEST_TIMEOUT_SECONDS=60
 GEMINI_MAX_RETRIES=3
@@ -101,7 +101,7 @@ CELERY_RESULT_BACKEND=django-db
 
 `EMAIL_HOST_USER` and `EMAIL_HOST_PASSWORD` can remain blank. Outreach credentials are configured per user inside the application.
 
-## Which Google credentials go where?
+## Credential configuration
 
 | Credential | Where it is configured | What it does |
 |---|---|---|
@@ -114,7 +114,7 @@ The app does not use the Gmail API, so it does not need a Gmail API key or OAuth
 
 Using separate restricted keys is recommended. A Gemini/AI Studio key may be limited by its project, enabled API, application restrictions, billing, or quota and should not be treated as a general Google Cloud key.
 
-## Create the Gemini key
+### Gemini API key
 
 1. Open Google AI Studio and create an API key.
 2. Put it in `.env` as `GEMINI_API_KEY`.
@@ -123,7 +123,7 @@ Using separate restricted keys is recommended. A Gemini/AI Studio key may be lim
 
 If the key is managed from Google Cloud, verify that its project and API restrictions allow the Gemini Generative Language API. A `403` generally indicates permissions or restrictions; a `429` generally indicates quota or rate limiting.
 
-## Create the Gmail app password
+### Gmail app password
 
 1. Enable 2-Step Verification on the sender's Google account.
 2. Create a Google app password for mail.
@@ -145,11 +145,11 @@ python manage.py runserver
 
 Open <http://127.0.0.1:8000/> and sign in with the superuser account.
 
-Recommended first test:
+### Safe smoke test
 
 1. Configure **My Mailbox**.
 2. Open **Templates** and create or review a campaign template.
-3. Add one contact using an email address controlled by the tester.
+3. Add one contact using a controlled test email address.
 4. Keep `ALLOW_STATIC_EMAIL_FALLBACK=False` so a Gemini problem cannot silently send generic mail.
 5. Run the campaign for that single contact.
 6. Open the contact thread and verify the generated body, generation mode, Message-ID, and delivery status.
