@@ -5,12 +5,18 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LoginView
+from django.core.exceptions import ValidationError
+from django.core.paginator import Paginator
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Max, Q, Sum
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.views.decorators.http import require_GET, require_http_methods
 
 from django.contrib.auth.models import User
 
 from .forms import (
+    CampaignLaunchForm,
     ClientForm,
     ClientStatusForm,
     ContactImportForm,
@@ -18,6 +24,7 @@ from .forms import (
     EditUserForm,
     LinkedInReachoutForm,
     MailboxSettingsForm,
+    OutreachCampaignForm,
 )
 from .models import (
     CampaignRun,
@@ -30,10 +37,47 @@ from .models import (
 from .tasks import (
     _DEFAULT_BODY_TPL,
     _DEFAULT_SUBJECT_TPL,
-    scan_inbox_for_replies,
     send_automated_pings,
-    send_followups,
+    scan_inbox_for_replies_task,
+    send_followups_task,
 )
+
+
+_MAX_IMPORT_ROWS = 5_000
+_MAX_IMPORT_WARNINGS = 20
+
+
+def _client_scope_for_user(user):
+    """Clients a user may view or mutate through the application."""
+    clients = Client.objects.all()
+    if _is_admin(user):
+        return clients
+    return clients.filter(Q(assigned_to=user) | Q(assigned_to__isnull=True))
+
+
+def _get_accessible_client(user, pk):
+    return get_object_or_404(_client_scope_for_user(user), pk=pk)
+
+
+def _campaign_run_scope_for_user(user):
+    """Campaign runs are private to their initiator, except for administrators."""
+    runs = CampaignRun.objects.all()
+    if _is_admin(user):
+        return runs
+    return runs.filter(triggered_by=user)
+
+
+def _normalise_email(value):
+    return (value or "").strip().lower()
+
+
+def _csv_cell(row, header_lookup, *candidate_headers):
+    """Return the first matching Apollo column using case-insensitive headers."""
+    for candidate in candidate_headers:
+        actual_header = header_lookup.get(candidate.casefold())
+        if actual_header is not None:
+            return (row.get(actual_header) or "").strip()
+    return ""
 
 
 def _parse_apollo_csv(file_obj, skip_unverified):
@@ -45,120 +89,187 @@ def _parse_apollo_csv(file_obj, skip_unverified):
     rows, errors = [], []
 
     try:
-        text = io.TextIOWrapper(file_obj, encoding="utf-8-sig", errors="replace")
-        reader = csv.DictReader(text)
-    except Exception as exc:
+        file_obj.seek(0)
+        text = file_obj.read().decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(text))
+    except (UnicodeDecodeError, OSError, csv.Error) as exc:
         return [], [f"Could not read file: {exc}"]
 
+    fieldnames = [name for name in (reader.fieldnames or []) if name]
+    header_lookup = {name.strip().casefold(): name for name in fieldnames}
     required = {"First Name", "Last Name", "Company Name", "Email", "Industry"}
-    if not required.issubset(set(reader.fieldnames or [])):
-        missing = required - set(reader.fieldnames or [])
+    missing = {
+        name for name in required if name.casefold() not in header_lookup
+    }
+    if missing:
         return [], [
             f"Missing required columns: {', '.join(sorted(missing))}. "
             "Make sure you exported the file in Apollo's standard contact format."
         ]
 
-    for i, row in enumerate(reader, start=2):  # row 1 is the header
-        email = row.get("Email", "").strip()
-        if not email:
-            errors.append(f"Row {i}: skipped — no email address.")
-            continue
+    seen_emails = set()
+    status_header_present = "email status" in header_lookup
 
-        if (
-            skip_unverified
-            and row.get("Email Status", "").strip().lower() != "verified"
-        ):
-            errors.append(f"Row {i} ({email}): skipped — Email Status is not Verified.")
-            continue
+    try:
+        for i, row in enumerate(reader, start=2):  # row 1 is the header
+            if i > _MAX_IMPORT_ROWS + 1:
+                errors.append(
+                    f"Import stopped after {_MAX_IMPORT_ROWS:,} data rows. "
+                    "Split larger exports into smaller files."
+                )
+                break
 
-        first = row.get("First Name", "").strip()
-        last = row.get("Last Name", "").strip()
-        contact_person = f"{first} {last}".strip() or email
+            email = _normalise_email(_csv_cell(row, header_lookup, "Email"))
+            if not email:
+                errors.append(f"Row {i}: skipped — no email address.")
+                continue
 
-        # Prefer "Work Direct Phone" over generic "Phone" if both present
-        phone = (
-            row.get("Work Direct Phone", "").strip()
-            or row.get("Phone", "").strip()
-            or row.get("Mobile Phone", "").strip()
-        )
+            email_status = _csv_cell(row, header_lookup, "Email Status").lower()
+            if skip_unverified and status_header_present and email_status != "verified":
+                errors.append(
+                    f"Row {i} ({email}): skipped — Email Status is not Verified."
+                )
+                continue
 
-        rows.append(
-            {
-                "company_name": row.get("Company Name", "").strip() or "Unknown",
+            if email in seen_emails:
+                errors.append(f"Row {i} ({email}): skipped — duplicate in this file.")
+                continue
+            seen_emails.add(email)
+
+            first = _csv_cell(row, header_lookup, "First Name")
+            last = _csv_cell(row, header_lookup, "Last Name")
+            contact_person = f"{first} {last}".strip() or email
+
+            # Prefer direct numbers over generic/corporate phone fields.
+            phone = _csv_cell(
+                row,
+                header_lookup,
+                "Work Direct Phone",
+                "Mobile Phone",
+                "Phone",
+                "Corporate Phone",
+            )
+
+            data = {
+                "company_name": _csv_cell(row, header_lookup, "Company Name")
+                or "Unknown",
                 "contact_person": contact_person,
                 "email": email,
-                "title": row.get("Title", "").strip(),
-                "industry": row.get("Industry", "").strip() or "Other",
+                "title": _csv_cell(row, header_lookup, "Title"),
+                "industry": _csv_cell(row, header_lookup, "Industry") or "Other",
                 "phone": phone,
-                "city": row.get("City", "").strip(),
-                "state": row.get("State", "").strip(),
-                "country": row.get("Country", "").strip(),
-                "website": row.get("Website", "").strip(),
-                "linkedin_url": row.get("LinkedIn URL", "").strip(),
-                "keywords": row.get("Keywords", "").strip(),
+                "city": _csv_cell(row, header_lookup, "City"),
+                "state": _csv_cell(row, header_lookup, "State"),
+                "country": _csv_cell(row, header_lookup, "Country"),
+                "website": _csv_cell(row, header_lookup, "Website"),
+                "linkedin_url": _csv_cell(
+                    row,
+                    header_lookup,
+                    "Person Linkedin Url",
+                    "Person Linkedin URL",
+                    "LinkedIn URL",
+                    "Linkedin Url",
+                ),
+                "keywords": _csv_cell(row, header_lookup, "Keywords"),
             }
-        )
+
+            # ORM create/save does not invoke field validators. Validate before any write.
+            candidate = Client(**data)
+            try:
+                candidate.full_clean(validate_unique=False)
+            except ValidationError as exc:
+                details = "; ".join(
+                    f"{field}: {', '.join(messages)}"
+                    for field, messages in exc.message_dict.items()
+                )
+                errors.append(f"Row {i} ({email}): skipped — {details}")
+                continue
+
+            rows.append(data)
+    except csv.Error as exc:
+        errors.append(f"CSV parsing stopped: {exc}")
 
     return rows, errors
 
 
 @login_required
+@require_http_methods(["GET", "POST"])
 def import_contacts(request):
     """
     GET  — render the upload form.
-    POST — parse the Apollo CSV, bulk-create new Clients (skip duplicates),
-           and redirect to the dashboard with a summary flash message.
+    POST — validate an Apollo CSV, create new Clients, and refresh records that
+           already belong to the current user or the shared pool.
     """
     if request.method == "POST":
         form = ContactImportForm(request.POST, request.FILES)
         if form.is_valid():
             skip_unverified = form.cleaned_data["skip_unverified"]
-            uploaded = request.FILES["csv_file"]
+            uploaded = form.cleaned_data["csv_file"]
 
             parsed_rows, parse_errors = _parse_apollo_csv(uploaded, skip_unverified)
 
             created_count = 0
-            duplicate_count = 0
+            updated_count = 0
+            protected_count = 0
             for data in parsed_rows:
-                obj, created = Client.objects.get_or_create(
-                    email=data["email"],
-                    defaults={
-                        "company_name": data["company_name"],
-                        "contact_person": data["contact_person"],
-                        "title": data.get("title", ""),
-                        "industry": data["industry"],
-                        "phone": data.get("phone", ""),
-                        "city": data.get("city", ""),
-                        "state": data.get("state", ""),
-                        "country": data.get("country", ""),
-                        "website": data.get("website", ""),
-                        "linkedin_url": data.get("linkedin_url", ""),
-                        "keywords": data.get("keywords", ""),
-                        "status": Client.Status.NOT_CONTACTED,
-                        "assigned_to": request.user,
-                    },
-                )
-                if created:
-                    created_count += 1
-                else:
-                    duplicate_count += 1
+                try:
+                    with transaction.atomic():
+                        existing = (
+                            Client.objects.select_for_update()
+                            .filter(email__iexact=data["email"])
+                            .order_by("pk")
+                            .first()
+                        )
+
+                        if existing is not None:
+                            if existing.assigned_to_id not in (None, request.user.pk):
+                                # Do not reveal or reassign another member's contact.
+                                protected_count += 1
+                                continue
+
+                            for field, value in data.items():
+                                setattr(existing, field, value)
+                            existing.full_clean()
+                            existing.save()
+                            updated_count += 1
+                        else:
+                            client = Client(
+                                **data,
+                                status=Client.Status.NOT_CONTACTED,
+                                assigned_to=request.user,
+                            )
+                            client.full_clean()
+                            client.save()
+                            created_count += 1
+                except (IntegrityError, ValidationError):
+                    parse_errors.append(
+                        f"{data['email']}: skipped — the record conflicts with existing data."
+                    )
 
             # Build summary message
-            parts = [f"<strong>{created_count}</strong> contact(s) imported."]
-            if duplicate_count:
+            parts = [f"{created_count} contact(s) imported."]
+            if updated_count:
+                parts.append(f"{updated_count} existing contact(s) updated.")
+            if protected_count:
                 parts.append(
-                    f"<strong>{duplicate_count}</strong> duplicate(s) skipped."
+                    f"{protected_count} contact(s) already belong to another member and were unchanged."
                 )
             if parse_errors:
                 parts.append(
-                    f"<strong>{len(parse_errors)}</strong> row(s) skipped "
+                    f"{len(parse_errors)} row(s) skipped "
                     f"(see details below)."
                 )
-            messages.success(request, " ".join(parts), extra_tags="safe")
+            messages.success(request, " ".join(parts))
 
             if parse_errors:
-                for err in parse_errors:
+                for err in parse_errors[:_MAX_IMPORT_WARNINGS]:
                     messages.warning(request, err)
+                hidden_error_count = len(parse_errors) - _MAX_IMPORT_WARNINGS
+                if hidden_error_count > 0:
+                    messages.warning(
+                        request,
+                        f"{hidden_error_count} additional row warning(s) were omitted.",
+                    )
 
             return redirect("outreach:dashboard")
     else:
@@ -193,7 +304,7 @@ def add_contact(request):
 @login_required
 def edit_contact(request, pk):
     """Edit all fields of an existing contact."""
-    client = get_object_or_404(Client, pk=pk)
+    client = _get_accessible_client(request.user, pk)
     if request.method == "POST":
         form = ClientForm(request.POST, instance=client)
         if form.is_valid():
@@ -216,7 +327,7 @@ def edit_contact(request, pk):
 @login_required
 def delete_contact(request, pk):
     """Confirm then delete a contact record."""
-    client = get_object_or_404(Client, pk=pk)
+    client = _get_accessible_client(request.user, pk)
     if request.method == "POST":
         name = f"{client.contact_person} ({client.company_name})"
         client.delete()
@@ -245,7 +356,6 @@ def dashboard(request):
     """
     status_filter = request.GET.get("status", "").strip()
     company_filter = request.GET.get("company", "").strip()
-    view_mode = request.GET.get("view", "").strip()  # "mine" or "all" or ""
     member_filter = request.GET.get("member", "").strip()  # username, admin only
 
     is_admin_user = _is_admin(request.user)
@@ -263,15 +373,7 @@ def dashboard(request):
         else:
             clients = Client.objects.all()
     else:
-        # Member: show own + shared unless "all" requested
-        if view_mode == "all":
-            clients = Client.objects.filter(
-                Q(assigned_to=request.user) | Q(assigned_to__isnull=True)
-            )
-        else:
-            clients = Client.objects.filter(
-                Q(assigned_to=request.user) | Q(assigned_to__isnull=True)
-            )
+        clients = _client_scope_for_user(request.user)
 
     company_choices = list(
         clients.order_by("company_name").values_list("company_name", flat=True).distinct()
@@ -295,11 +397,18 @@ def dashboard(request):
         TeamMember.objects.select_related("user").all() if is_admin_user else []
     )
 
-    context = {
-        "clients": clients.select_related("assigned_to").annotate(
+    clients = clients.select_related("assigned_to").annotate(
             linkedin_reachouts_count=Count("linkedin_reachouts"),
             last_linkedin_at=Max("linkedin_reachouts__happened_at"),
-        ),
+        ).order_by("company_name", "pk")
+    page_obj = Paginator(clients, 50).get_page(request.GET.get("page"))
+    pagination_params = request.GET.copy()
+    pagination_params.pop("page", None)
+
+    context = {
+        "clients": page_obj,
+        "page_obj": page_obj,
+        "pagination_query": pagination_params.urlencode(),
         "status_choices": Client.Status.choices,
         "active_filter": status_filter,
         "company_filter": company_filter,
@@ -315,7 +424,7 @@ def dashboard(request):
 @login_required
 def update_client_status(request, pk):
     """Allows a team member to update a single client's status."""
-    client = get_object_or_404(Client, pk=pk)
+    client = _get_accessible_client(request.user, pk)
     if request.method == "POST":
         form = ClientStatusForm(request.POST, instance=client)
         if form.is_valid():
@@ -335,70 +444,119 @@ def update_client_status(request, pk):
 
 
 @login_required
+@require_http_methods(["GET", "POST"])
 def run_campaign(request):
     """
     GET  – shows a form to select a campaign and preview target clients.
-    POST – creates a CampaignRun, launches the task in a background thread,
-           and redirects to the live progress page.
+    POST – validates the bulk-send confirmation, creates an owned CampaignRun,
+           queues the Celery task, and redirects to the live progress page.
     """
-    import threading
-    from django.conf import settings as dj_settings
-
-    campaigns = OutreachCampaign.objects.all()
-    not_contacted_count = Client.objects.filter(
+    campaigns = list(OutreachCampaign.objects.all())
+    eligible_clients = _client_scope_for_user(request.user).filter(
         status=Client.Status.NOT_CONTACTED
-    ).filter(Q(assigned_to=request.user) | Q(assigned_to__isnull=True)).count()
+    )
+    not_contacted_count = eligible_clients.count()
+    form = CampaignLaunchForm(request.POST or None)
 
     if request.method == "POST":
         mailbox_ready, mailbox_error = _validate_user_mailbox(request.user)
         if not mailbox_ready:
             messages.error(request, mailbox_error)
             return redirect("outreach:mailbox_settings")
+        if form.is_valid():
+            campaign = form.cleaned_data["campaign_id"]
+            campaign_clients = eligible_clients
+            if (
+                campaign
+                and campaign.target_industry
+                and campaign.target_industry.strip().casefold() not in {"all", "any", "*"}
+            ):
+                campaign_clients = campaign_clients.filter(
+                    industry__iexact=campaign.target_industry.strip()
+                )
+            recipient_count = campaign_clients.count()
 
-        campaign_id_raw = request.POST.get("campaign_id") or None
-        campaign_id = int(campaign_id_raw) if campaign_id_raw else None
+            if recipient_count == 0:
+                form.add_error(
+                    "campaign_id",
+                    "No eligible contacts match this campaign's target industry.",
+                )
+            else:
+                run = CampaignRun.objects.create(
+                    total=recipient_count,
+                    triggered_by=request.user,
+                    campaign=campaign,
+                    operation=CampaignRun.Operation.INITIAL,
+                )
+                try:
+                    send_automated_pings.delay(
+                        campaign_id=campaign.pk if campaign else None,
+                        triggered_by_user_id=request.user.pk,
+                        run_id=run.pk,
+                    )
+                except Exception as exc:  # broker unavailable / enqueue failure
+                    run.status = CampaignRun.RunStatus.FAILED
+                    run.current_step = "queueing"
+                    run.error_message = f"Could not queue campaign: {exc}"
+                    run.finished_at = timezone.now()
+                    run.save(
+                        update_fields=[
+                            "status",
+                            "current_step",
+                            "error_message",
+                            "finished_at",
+                        ]
+                    )
+                return redirect("outreach:campaign_progress_page", run_id=run.pk)
 
-        # Create a CampaignRun row for progress tracking
-        run = CampaignRun.objects.create(total=not_contacted_count)
-
-        # Launch the task in a background thread so the response returns immediately
-        def _run_task():
-            send_automated_pings(
-                campaign_id=campaign_id,
-                triggered_by_user_id=request.user.pk,
-                run_id=run.pk,
-            )
-
-        thread = threading.Thread(target=_run_task, daemon=True)
-        thread.start()
-
-        return redirect("outreach:campaign_progress_page", run_id=run.pk)
+    campaign_previews = {
+        str(campaign.pk): {
+            "subject": campaign.subject_template,
+            "body": campaign.email_template,
+            "recipient_count": (
+                eligible_clients.filter(
+                    industry__iexact=campaign.target_industry.strip()
+                ).count()
+                if campaign.target_industry
+                and campaign.target_industry.strip().casefold() not in {"all", "any", "*"}
+                else not_contacted_count
+            ),
+        }
+        for campaign in campaigns
+    }
 
     context = {
+        "form": form,
         "campaigns": campaigns,
+        "campaign_previews": campaign_previews,
         "not_contacted_count": not_contacted_count,
         "default_subject": _DEFAULT_SUBJECT_TPL,
         "default_body": _DEFAULT_BODY_TPL,
-        "ai_enabled": bool(getattr(dj_settings, "GOOGLE_API_KEY", "")),
+        "ai_enabled": bool(getattr(settings, "GEMINI_API_KEY", "")),
+        "fallback_enabled": bool(
+            getattr(settings, "ALLOW_STATIC_EMAIL_FALLBACK", False)
+        ),
     }
     return render(request, "outreach/run_campaign.html", context)
 
 
 @login_required
+@require_GET
 def campaign_progress_api(request, run_id):
     """JSON endpoint polled by the progress page."""
-    from django.http import JsonResponse
-
-    run = get_object_or_404(CampaignRun, pk=run_id)
+    run = get_object_or_404(_campaign_run_scope_for_user(request.user), pk=run_id)
     return JsonResponse(
         {
             "status": run.status,
+            "operation": run.operation,
             "total": run.total,
             "processed": run.processed,
             "sent": run.sent,
             "failed": run.failed,
+            "fallback_count": run.fallback_count,
             "current_company": run.current_company,
             "current_step": run.current_step,
+            "error_message": run.error_message,
             "log": run.log,
             "started_at": run.started_at.isoformat() if run.started_at else None,
             "finished_at": run.finished_at.isoformat() if run.finished_at else None,
@@ -407,9 +565,10 @@ def campaign_progress_api(request, run_id):
 
 
 @login_required
+@require_GET
 def campaign_progress_page(request, run_id):
     """Renders the live progress bar page for a campaign run."""
-    run = get_object_or_404(CampaignRun, pk=run_id)
+    run = get_object_or_404(_campaign_run_scope_for_user(request.user), pk=run_id)
     return render(request, "outreach/campaign_progress.html", {"run": run})
 
 
@@ -426,34 +585,21 @@ def scan_replies(request):
             messages.error(request, mailbox_error)
             return redirect("outreach:mailbox_settings")
 
-        result = scan_inbox_for_replies(triggered_by_user_id=request.user.pk)
-
-        if "error" in result:
-            messages.error(request, f"Scan failed: {result['error']}")
-        else:
-            new = result.get("new_replies", 0)
-            scanned = result.get("scanned", 0)
-            mailbox = result.get("mailbox", "?")
-            if new:
-                messages.success(
-                    request,
-                    f"Scanned <strong>{scanned}</strong> client(s) in <em>{mailbox}</em>. "
-                    f"Found <strong>{new}</strong> new reply(ies). "
-                    f"Sentiment analysis complete.",
-                    extra_tags="safe",
-                )
-            else:
-                messages.info(
-                    request,
-                    f"Scanned <strong>{scanned}</strong> client(s) in <em>{mailbox}</em>. "
-                    f"No new replies found.",
-                    extra_tags="safe",
-                )
-            if result.get("errors"):
-                for err in result["errors"]:
-                    messages.warning(request, err)
-
-        return redirect("outreach:scan_replies")
+        run = CampaignRun.objects.create(
+            operation=CampaignRun.Operation.REPLY_SCAN,
+            triggered_by=request.user,
+        )
+        try:
+            scan_inbox_for_replies_task.delay(
+                triggered_by_user_id=request.user.pk, run_id=run.pk
+            )
+        except Exception as exc:
+            run.status = CampaignRun.RunStatus.FAILED
+            run.current_step = "queueing"
+            run.error_message = f"Could not queue reply scan: {exc}"
+            run.finished_at = timezone.now()
+            run.save(update_fields=["status", "current_step", "error_message", "finished_at"])
+        return redirect("outreach:campaign_progress_page", run_id=run.pk)
 
     # Stats for the GET page
     total_pinged = Client.objects.filter(
@@ -463,7 +609,7 @@ def scan_replies(request):
         Q(assigned_to=request.user) | Q(assigned_to__isnull=True)
     ).count()
     recent_replies = EmailReply.objects.select_related("client").filter(
-        Q(client__assigned_to=request.user) | Q(client__assigned_to__isnull=True)
+        client__in=_client_scope_for_user(request.user)
     )[:20]
 
     return render(
@@ -480,9 +626,12 @@ def scan_replies(request):
 @login_required
 def client_thread(request, pk):
     """Show the full email thread and sentiment for a single client."""
-    client = get_object_or_404(Client, pk=pk)
+    client = _get_accessible_client(request.user, pk)
     replies = client.replies.all()
     action_logs = client.action_logs.select_related("team_member", "campaign")[:20]
+    outbound_emails = client.outbound_emails.select_related(
+        "team_member", "campaign", "campaign_run"
+    )[:50]
     linkedin_reachouts = client.linkedin_reachouts.select_related("team_member")[:20]
     return render(
         request,
@@ -491,6 +640,7 @@ def client_thread(request, pk):
             "client": client,
             "replies": replies,
             "action_logs": action_logs,
+            "outbound_emails": outbound_emails,
             "linkedin_reachouts": linkedin_reachouts,
         },
     )
@@ -499,7 +649,7 @@ def client_thread(request, pk):
 @login_required
 def log_linkedin_reachout(request, pk):
     """Manually record a LinkedIn outreach touchpoint for a client."""
-    client = get_object_or_404(Client, pk=pk)
+    client = _get_accessible_client(request.user, pk)
     recent_reachouts = client.linkedin_reachouts.select_related("team_member")[:10]
 
     if request.method == "POST":
@@ -543,31 +693,26 @@ def run_followups(request):
             messages.error(request, mailbox_error)
             return redirect("outreach:mailbox_settings")
 
-        result = send_followups(triggered_by_user_id=request.user.pk)
-        sent = result.get("sent", 0)
-        failed = result.get("failed", 0)
-        skipped = result.get("skipped", 0)
-
-        if result.get("error"):
-            messages.error(request, result["error"])
-            return redirect("outreach:run_followups")
-
-        if sent:
-            messages.success(
-                request,
-                f"<strong>{sent}</strong> follow-up(s) sent. "
-                f"<strong>{skipped}</strong> skipped (too soon). "
-                f"<strong>{failed}</strong> failed.",
-                extra_tags="safe",
+        candidate_count = _client_scope_for_user(request.user).filter(
+            status__in=[Client.Status.PINGED, Client.Status.FOLLOW_UP],
+            has_replied=False,
+        ).exclude(email="").count()
+        run = CampaignRun.objects.create(
+            operation=CampaignRun.Operation.FOLLOWUP,
+            triggered_by=request.user,
+            total=candidate_count,
+        )
+        try:
+            send_followups_task.delay(
+                triggered_by_user_id=request.user.pk, run_id=run.pk
             )
-        else:
-            messages.info(
-                request,
-                f"No follow-ups sent. <strong>{skipped}</strong> client(s) not yet due.",
-                extra_tags="safe",
-            )
-
-        return redirect("outreach:run_followups")
+        except Exception as exc:
+            run.status = CampaignRun.RunStatus.FAILED
+            run.current_step = "queueing"
+            run.error_message = f"Could not queue follow-ups: {exc}"
+            run.finished_at = timezone.now()
+            run.save(update_fields=["status", "current_step", "error_message", "finished_at"])
+        return redirect("outreach:campaign_progress_page", run_id=run.pk)
 
     # Eligible candidates
     from .tasks import _FOLLOWUP_INTERVALS, _MAX_FOLLOWUPS
@@ -617,6 +762,37 @@ def _validate_user_mailbox(user):
     if not profile.mailbox_app_password:
         return False, "Set your mailbox app password in My Mailbox before sending or scanning mail."
     return True, ""
+
+
+@login_required
+def campaign_list(request):
+    """List editable campaign templates for application administrators."""
+    if not _is_admin(request.user):
+        messages.error(request, "Only admins can manage campaign templates.")
+        return redirect("outreach:dashboard")
+    campaigns = OutreachCampaign.objects.all()
+    return render(
+        request, "outreach/campaign_list.html", {"campaigns": campaigns}
+    )
+
+
+@login_required
+def campaign_edit(request, pk=None):
+    """Create or update a campaign template."""
+    if not _is_admin(request.user):
+        messages.error(request, "Only admins can manage campaign templates.")
+        return redirect("outreach:dashboard")
+    campaign = get_object_or_404(OutreachCampaign, pk=pk) if pk else None
+    form = OutreachCampaignForm(request.POST or None, instance=campaign)
+    if request.method == "POST" and form.is_valid():
+        saved = form.save()
+        messages.success(request, f"Campaign template '{saved.name}' saved.")
+        return redirect("outreach:campaign_list")
+    return render(
+        request,
+        "outreach/campaign_form.html",
+        {"form": form, "campaign": campaign},
+    )
 
 
 @login_required
@@ -679,18 +855,21 @@ def team_edit(request, pk):
     target_user = profile.user
 
     if request.method == "POST":
-        form = EditUserForm(request.POST)
+        form = EditUserForm(request.POST, user=target_user)
         if form.is_valid():
             target_user.first_name = form.cleaned_data["first_name"]
             target_user.last_name = form.cleaned_data["last_name"]
             target_user.email = form.cleaned_data["email"]
             target_user.is_active = form.cleaned_data["is_active"]
             target_user.save()
+            if not target_user.is_active:
+                Client.objects.filter(assigned_to=target_user).update(assigned_to=None)
             profile.role = form.cleaned_data["role"]
             profile.sender_name = form.cleaned_data["sender_name"]
             profile.sender_role = form.cleaned_data["sender_role"]
             profile.mailbox_email = form.cleaned_data["mailbox_email"]
-            profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
+            if form.cleaned_data["mailbox_app_password"]:
+                profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
             profile.save()
             messages.success(
                 request,
@@ -707,7 +886,6 @@ def team_edit(request, pk):
                 "sender_name": profile.sender_name,
                 "sender_role": profile.sender_role,
                 "mailbox_email": profile.mailbox_email,
-                "mailbox_app_password": profile.mailbox_app_password,
                 "role": profile.role,
                 "is_active": target_user.is_active,
             }
@@ -731,7 +909,8 @@ def mailbox_settings(request):
             profile.sender_name = form.cleaned_data["sender_name"]
             profile.sender_role = form.cleaned_data["sender_role"]
             profile.mailbox_email = form.cleaned_data["mailbox_email"]
-            profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
+            if form.cleaned_data["mailbox_app_password"]:
+                profile.mailbox_app_password = form.cleaned_data["mailbox_app_password"]
             profile.save()
             messages.success(request, "Mailbox settings updated.")
             return redirect("outreach:mailbox_settings")
@@ -741,7 +920,6 @@ def mailbox_settings(request):
                 "sender_name": profile.sender_name,
                 "sender_role": profile.sender_role,
                 "mailbox_email": profile.mailbox_email,
-                "mailbox_app_password": profile.mailbox_app_password,
             }
         )
 
@@ -767,8 +945,10 @@ def team_delete(request, pk):
         return redirect("outreach:team_list")
 
     if request.method == "POST":
-        target_user.is_active = False
-        target_user.save()
+        with transaction.atomic():
+            target_user.is_active = False
+            target_user.save(update_fields=["is_active"])
+            Client.objects.filter(assigned_to=target_user).update(assigned_to=None)
         name = target_user.get_full_name() or target_user.username
         messages.success(
             request,

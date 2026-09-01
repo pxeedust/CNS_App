@@ -13,38 +13,92 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 
+import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
-
-try:
-    import dj_database_url
-except ImportError:  # pragma: no cover - optional until deployment deps are installed
-    dj_database_url = None
-
-try:
-    import whitenoise  # noqa: F401
-except ImportError:  # pragma: no cover - optional until deployment deps are installed
-    whitenoise = None
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-load_dotenv(BASE_DIR / ".env", override=True)
+# A local .env is a development convenience. Platform-provided environment
+# variables must always win in staging and production.
+load_dotenv(BASE_DIR / ".env", override=False)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a conventional boolean environment variable."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer environment variable with an actionable error."""
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be an integer.") from exc
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        return float(raw_value)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be a number.") from exc
+
+
+def _env_list(name: str, default: str = "") -> list[str]:
+    """Read a comma-separated environment variable."""
+    return [value.strip() for value in os.getenv(name, default).split(",") if value.strip()]
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv(
-    "SECRET_KEY", "django-insecure-3+i7&y5z628g^d@c=uq#rdsj^y8_20z22l0418e4i0j+87b#qf"
+DJANGO_ENV = os.getenv("DJANGO_ENV", "development").strip().lower()
+if DJANGO_ENV not in {"development", "test", "staging", "production"}:
+    raise ImproperlyConfigured(
+        "DJANGO_ENV must be one of: development, test, staging, production."
+    )
+IS_PRODUCTION = DJANGO_ENV == "production"
+
+# SECURITY WARNING: keep the secret key used in production secret. The fallback
+# is intentionally limited to non-production environments so a fresh checkout
+# remains easy to run without silently weakening a deployment.
+_configured_secret_key = os.getenv("SECRET_KEY", "").strip()
+if IS_PRODUCTION and not _configured_secret_key:
+    raise ImproperlyConfigured("SECRET_KEY is required when DJANGO_ENV=production.")
+if IS_PRODUCTION and (
+    len(_configured_secret_key) < 50
+    or _configured_secret_key.startswith("django-insecure-")
+):
+    raise ImproperlyConfigured(
+        "SECRET_KEY must be a strong random value of at least 50 characters in production."
+    )
+SECRET_KEY = _configured_secret_key or "django-insecure-development-only-change-me"
+
+# SECURITY WARNING: never enable DEBUG in production.
+DEBUG = _env_bool("DEBUG", default=False)
+if IS_PRODUCTION and DEBUG:
+    raise ImproperlyConfigured("DEBUG must be False when DJANGO_ENV=production.")
+
+ALLOWED_HOSTS = _env_list(
+    "ALLOWED_HOSTS",
+    default="localhost,127.0.0.1,[::1],testserver" if not IS_PRODUCTION else "",
 )
+if IS_PRODUCTION and not ALLOWED_HOSTS:
+    raise ImproperlyConfigured(
+        "ALLOWED_HOSTS must contain the production hostname when DJANGO_ENV=production."
+    )
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DEBUG", "False").strip().lower() == "true"
-
-ALLOWED_HOSTS = [
-    host.strip() for host in os.getenv("ALLOWED_HOSTS", "").split(",") if host.strip()
-]
+CSRF_TRUSTED_ORIGINS = _env_list("CSRF_TRUSTED_ORIGINS")
 
 
 # Application definition
@@ -68,6 +122,7 @@ LOGOUT_REDIRECT_URL = "login"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -75,9 +130,6 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
-
-if whitenoise:
-    MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
 
 ROOT_URLCONF = "cns_app.urls"
 
@@ -102,20 +154,18 @@ WSGI_APPLICATION = "cns_app.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-if dj_database_url:
-    DATABASES = {
-        "default": dj_database_url.config(
-            default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
-            conn_max_age=600,
-        )
-    }
-else:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
-        }
-    }
+_database_url = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'db.sqlite3'}")
+_database_uses_network = not _database_url.lower().startswith("sqlite")
+DATABASES = {
+    "default": dj_database_url.config(
+        default=_database_url,
+        conn_max_age=_env_int("DATABASE_CONN_MAX_AGE", 600),
+        conn_health_checks=True,
+        ssl_require=_env_bool(
+            "DATABASE_SSL_REQUIRE", default=IS_PRODUCTION and _database_uses_network
+        ),
+    )
+}
 
 
 # Password validation
@@ -142,7 +192,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = "UTC"
+TIME_ZONE = os.getenv("TIME_ZONE", "Asia/Kolkata")
 
 USE_I18N = True
 
@@ -154,8 +204,18 @@ USE_TZ = True
 
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-if whitenoise:
-    STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": (
+            "whitenoise.storage.CompressedManifestStaticFilesStorage"
+            if IS_PRODUCTION
+            else "whitenoise.storage.CompressedStaticFilesStorage"
+        ),
+    },
+}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -168,24 +228,56 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # ---------------------------------------------------------------------------
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", 587))
-EMAIL_USE_TLS = True
+EMAIL_PORT = _env_int("EMAIL_PORT", 587)
+EMAIL_USE_TLS = _env_bool("EMAIL_USE_TLS", default=True)
+EMAIL_USE_SSL = _env_bool("EMAIL_USE_SSL", default=False)
+if EMAIL_USE_TLS and EMAIL_USE_SSL:
+    raise ImproperlyConfigured("EMAIL_USE_TLS and EMAIL_USE_SSL cannot both be True.")
+EMAIL_TIMEOUT = _env_int("EMAIL_TIMEOUT", 30)
+SMTP_TIMEOUT_SECONDS = _env_int("SMTP_TIMEOUT_SECONDS", EMAIL_TIMEOUT)
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
 OUTREACH_CC_EMAILS = os.getenv("OUTREACH_CC_EMAILS", "")  # comma-separated
 
 # ---------------------------------------------------------------------------
-# Google Gemini AI
+# Google Gemini AI. New AI Studio keys are Gemini-only credentials. Keep other
+# Google services on separately named credentials instead of sharing this key.
 # ---------------------------------------------------------------------------
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+# GOOGLE_API_KEY remains a legacy Gemini fallback only. New deployments should
+# use GEMINI_API_KEY and keep unrelated Google service credentials separate.
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY", "") or GOOGLE_API_KEY).strip()
+GOOGLE_CLOUD_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_REQUEST_TIMEOUT_SECONDS = _env_int("GEMINI_REQUEST_TIMEOUT_SECONDS", 60)
+GEMINI_MAX_RETRIES = _env_int("GEMINI_MAX_RETRIES", 3)
+GEMINI_RETRY_BASE_SECONDS = _env_float("GEMINI_RETRY_BASE_SECONDS", 0.5)
+# Never send a generic email merely because AI failed unless an operator opts in.
+ALLOW_STATIC_EMAIL_FALLBACK = _env_bool("ALLOW_STATIC_EMAIL_FALLBACK", default=False)
 
 # ---------------------------------------------------------------------------
 # IMAP (for scanning replies)
 # ---------------------------------------------------------------------------
 IMAP_HOST = os.getenv("IMAP_HOST", "imap.gmail.com")
-IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
+IMAP_PORT = _env_int("IMAP_PORT", 993)
+IMAP_USE_SSL = _env_bool("IMAP_USE_SSL", default=True)
+IMAP_TIMEOUT_SECONDS = _env_int("IMAP_TIMEOUT_SECONDS", 30)
+
+# Fernet key used to encrypt mailbox app passwords at rest. Generate with:
+# python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+MAILBOX_ENCRYPTION_KEY = os.getenv("MAILBOX_ENCRYPTION_KEY", "").strip() or (
+    SECRET_KEY if not IS_PRODUCTION else ""
+)
+MAILBOX_ENCRYPTION_OLD_KEYS = _env_list("MAILBOX_ENCRYPTION_OLD_KEYS")
+if IS_PRODUCTION and not MAILBOX_ENCRYPTION_KEY:
+    raise ImproperlyConfigured(
+        "MAILBOX_ENCRYPTION_KEY is required when DJANGO_ENV=production."
+    )
+if IS_PRODUCTION and MAILBOX_ENCRYPTION_KEY == SECRET_KEY:
+    raise ImproperlyConfigured(
+        "MAILBOX_ENCRYPTION_KEY must be different from SECRET_KEY in production."
+    )
 
 # ---------------------------------------------------------------------------
 # Follow-up settings
@@ -200,22 +292,103 @@ MAX_FOLLOWUPS = 3
 # Default broker: Redis. If Redis is not available locally (no Docker),
 # set CELERY_BROKER_URL=filesystem:// in .env to use the filesystem transport
 # (development only — no external service required).
-_broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-CELERY_BROKER_URL = _broker_url
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+if CELERY_BROKER_URL.startswith("filesystem://"):
+    CELERY_BROKER_TRANSPORT_OPTIONS = {
+        "data_folder_in": str(BASE_DIR / "celery_broker"),
+        "data_folder_out": str(BASE_DIR / "celery_broker"),
+        "store_processed": True,
+        "processed_folder": str(BASE_DIR / "celery_broker" / "processed"),
+    }
+else:
+    CELERY_BROKER_TRANSPORT_OPTIONS = {
+        "visibility_timeout": _env_int("CELERY_VISIBILITY_TIMEOUT", 3600),
+    }
 
-# Filesystem broker transport options (only used when broker is filesystem://)
-CELERY_BROKER_TRANSPORT_OPTIONS = {
-    "data_folder_in": str(BASE_DIR / "celery_broker"),
-    "data_folder_out": str(BASE_DIR / "celery_broker"),
-}
-
-CELERY_RESULT_BACKEND = "django-db"  # stores results in django_celery_results
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "django-db")
 CELERY_CACHE_BACKEND = "default"
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
-# In DEBUG mode tasks run synchronously in the same process — no worker needed.
-CELERY_TASK_ALWAYS_EAGER = DEBUG
-CELERY_TASK_EAGER_PROPAGATES = DEBUG
+CELERY_TASK_ACKS_LATE = _env_bool("CELERY_TASK_ACKS_LATE", default=True)
+CELERY_TASK_REJECT_ON_WORKER_LOST = _env_bool(
+    "CELERY_TASK_REJECT_ON_WORKER_LOST", default=True
+)
+CELERY_WORKER_PREFETCH_MULTIPLIER = _env_int("CELERY_WORKER_PREFETCH_MULTIPLIER", 1)
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BROKER_CONNECTION_MAX_RETRIES = _env_int(
+    "CELERY_BROKER_CONNECTION_MAX_RETRIES", 10
+)
+CELERY_BROKER_HEARTBEAT = _env_int("CELERY_BROKER_HEARTBEAT", 30)
+CELERY_RESULT_EXPIRES = _env_int("CELERY_RESULT_EXPIRES", 86400)
+CELERY_TASK_SOFT_TIME_LIMIT = _env_int("CELERY_TASK_SOFT_TIME_LIMIT", 840)
+CELERY_TASK_TIME_LIMIT = _env_int("CELERY_TASK_TIME_LIMIT", 900)
+if CELERY_TASK_SOFT_TIME_LIMIT >= CELERY_TASK_TIME_LIMIT:
+    raise ImproperlyConfigured(
+        "CELERY_TASK_SOFT_TIME_LIMIT must be lower than CELERY_TASK_TIME_LIMIT."
+    )
+CELERY_WORKER_MAX_TASKS_PER_CHILD = _env_int("CELERY_WORKER_MAX_TASKS_PER_CHILD", 100)
+
+# Local development can opt into eager execution; production should run a real
+# worker so web requests are not tied to long-running campaign tasks.
+CELERY_TASK_ALWAYS_EAGER = _env_bool("CELERY_TASK_ALWAYS_EAGER", default=DEBUG)
+CELERY_TASK_EAGER_PROPAGATES = _env_bool(
+    "CELERY_TASK_EAGER_PROPAGATES", default=DEBUG
+)
+
+
+# ---------------------------------------------------------------------------
+# Transport and browser security
+# ---------------------------------------------------------------------------
+SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", default=IS_PRODUCTION)
+SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", default=IS_PRODUCTION)
+CSRF_COOKIE_SECURE = _env_bool("CSRF_COOKIE_SECURE", default=IS_PRODUCTION)
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
+SECURE_HSTS_SECONDS = _env_int(
+    "SECURE_HSTS_SECONDS", 31536000 if IS_PRODUCTION else 0
+)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool(
+    "SECURE_HSTS_INCLUDE_SUBDOMAINS", default=IS_PRODUCTION
+)
+SECURE_HSTS_PRELOAD = _env_bool("SECURE_HSTS_PRELOAD", default=IS_PRODUCTION)
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = os.getenv("SECURE_REFERRER_POLICY", "same-origin")
+X_FRAME_OPTIONS = os.getenv("X_FRAME_OPTIONS", "DENY")
+
+if _env_bool("USE_X_FORWARDED_PROTO", default=IS_PRODUCTION):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+
+# ---------------------------------------------------------------------------
+# Console logging (captured by common application hosting platforms)
+# ---------------------------------------------------------------------------
+DJANGO_LOG_LEVEL = os.getenv("DJANGO_LOG_LEVEL", "INFO")
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": DJANGO_LOG_LEVEL,
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": DJANGO_LOG_LEVEL,
+            "propagate": False,
+        },
+        "outreach": {
+            "handlers": ["console"],
+            "level": os.getenv("OUTREACH_LOG_LEVEL", DJANGO_LOG_LEVEL),
+            "propagate": False,
+        },
+    },
+}

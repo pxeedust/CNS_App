@@ -1,11 +1,15 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django.core.validators import URLValidator
 from django.utils import timezone
+
+from .fields import EncryptedTextField
 
 
 class Client(models.Model):
     class Status(models.TextChoices):
         NOT_CONTACTED = "Not Contacted", "Not Contacted"
+        SENDING = "Sending", "Sending"
         PINGED = "Pinged", "Pinged"
         REPLIED = "Replied", "Replied"
         FOLLOW_UP = "Follow Up", "Follow Up"
@@ -31,8 +35,12 @@ class Client(models.Model):
     city = models.CharField(max_length=100, blank=True)
     state = models.CharField(max_length=100, blank=True)
     country = models.CharField(max_length=100, blank=True)
-    website = models.URLField(blank=True)
-    linkedin_url = models.URLField(blank=True)
+    website = models.URLField(
+        blank=True, validators=[URLValidator(schemes=["http", "https"])]
+    )
+    linkedin_url = models.URLField(
+        blank=True, validators=[URLValidator(schemes=["http", "https"])]
+    )
     keywords = models.TextField(
         blank=True, help_text="Comma-separated tags from Apollo"
     )
@@ -60,6 +68,14 @@ class Client(models.Model):
         related_name="assigned_clients",
         help_text="Team member responsible for this client. Null = shared pool.",
     )
+    send_claimed_at = models.DateTimeField(null=True, blank=True)
+    send_claimed_by = models.ForeignKey(
+        "CampaignRun",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="claimed_clients",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -69,11 +85,20 @@ class Client(models.Model):
     def __str__(self):
         return f"{self.company_name} — {self.contact_person} ({self.status})"
 
+    def save(self, *args, **kwargs):
+        self.email = (self.email or "").strip().lower()
+        super().save(*args, **kwargs)
+
 
 class OutreachCampaign(models.Model):
     name = models.CharField(max_length=255, unique=True)
     email_template = models.TextField(
         help_text="Use {{first_name}}, {{company}}, etc. as placeholders."
+    )
+    subject_template = models.CharField(
+        max_length=500,
+        default="180DC IIT Kharagpur X {{company}}",
+        help_text="Use the same placeholders as the body template.",
     )
     target_industry = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -95,11 +120,22 @@ class ActionLog(models.Model):
     )
     client = models.ForeignKey(
         Client,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="action_logs",
     )
+    client_company = models.CharField(max_length=255, blank=True)
+    client_email = models.EmailField(blank=True)
     campaign = models.ForeignKey(
         OutreachCampaign,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="action_logs",
+    )
+    outbound_email = models.ForeignKey(
+        "OutboundEmail",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -117,7 +153,14 @@ class ActionLog(models.Model):
             if self.team_member
             else "Unknown"
         )
-        return f"{team_member_name} → {self.client.company_name} on {self.emailed_at:%Y-%m-%d %H:%M}"
+        company = self.client.company_name if self.client else self.client_company or "Unknown"
+        return f"{team_member_name} -> {company} on {self.emailed_at:%Y-%m-%d %H:%M}"
+
+    def save(self, *args, **kwargs):
+        if self.client_id:
+            self.client_company = self.client.company_name
+            self.client_email = self.client.email
+        super().save(*args, **kwargs)
 
 
 class CampaignRun(models.Model):
@@ -128,18 +171,42 @@ class CampaignRun(models.Model):
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
 
+    class Operation(models.TextChoices):
+        INITIAL = "initial", "Initial outreach"
+        FOLLOWUP = "followup", "Follow-up outreach"
+        REPLY_SCAN = "reply_scan", "Reply scan"
+
     status = models.CharField(
         max_length=20, choices=RunStatus.choices, default=RunStatus.RUNNING
+    )
+    operation = models.CharField(
+        max_length=20, choices=Operation.choices, default=Operation.INITIAL
+    )
+    triggered_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="campaign_runs",
+    )
+    campaign = models.ForeignKey(
+        OutreachCampaign,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="runs",
     )
     total = models.PositiveIntegerField(default=0)
     processed = models.PositiveIntegerField(default=0)
     sent = models.PositiveIntegerField(default=0)
     failed = models.PositiveIntegerField(default=0)
+    fallback_count = models.PositiveIntegerField(default=0)
     current_company = models.CharField(max_length=255, blank=True)
     current_step = models.CharField(
         max_length=50, blank=True, help_text="researching / generating / sending"
     )
     log = models.JSONField(default=list, blank=True)
+    error_message = models.TextField(blank=True)
     started_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
 
@@ -153,7 +220,23 @@ class CampaignRun(models.Model):
 class EmailReply(models.Model):
     """Stores individual reply emails discovered via IMAP scanning."""
 
-    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name="replies")
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="replies",
+    )
+    client_company = models.CharField(max_length=255, blank=True)
+    client_email = models.EmailField(blank=True)
+    outbound_email = models.ForeignKey(
+        "OutboundEmail",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="replies",
+        help_text="Outgoing message this reply belongs to, when known.",
+    )
     subject = models.CharField(max_length=500, blank=True)
     body = models.TextField()
     received_at = models.DateTimeField()
@@ -174,7 +257,14 @@ class EmailReply(models.Model):
         ordering = ["-received_at"]
 
     def __str__(self):
-        return f"Reply from {self.client.company_name} on {self.received_at:%Y-%m-%d %H:%M}"
+        company = self.client.company_name if self.client else self.client_company or "Unknown"
+        return f"Reply from {company} on {self.received_at:%Y-%m-%d %H:%M}"
+
+    def save(self, *args, **kwargs):
+        if self.client_id:
+            self.client_company = self.client.company_name
+            self.client_email = self.client.email
+        super().save(*args, **kwargs)
 
 
 class TeamMember(models.Model):
@@ -200,8 +290,7 @@ class TeamMember(models.Model):
         blank=True,
         help_text="Mailbox used for outbound email and IMAP reply scanning.",
     )
-    mailbox_app_password = models.CharField(
-        max_length=255,
+    mailbox_app_password = EncryptedTextField(
         blank=True,
         help_text="App password or mailbox password used for SMTP/IMAP.",
     )
@@ -224,6 +313,88 @@ class TeamMember(models.Model):
     @property
     def effective_mailbox_email(self):
         return self.mailbox_email or self.user.email
+
+
+class OutboundEmail(models.Model):
+    """Durable audit and idempotency record for an outbound email attempt."""
+
+    class GenerationMode(models.TextChoices):
+        AI = "ai", "Gemini AI"
+        CAMPAIGN_TEMPLATE = "campaign_template", "Campaign template"
+        STATIC_TEMPLATE = "static_template", "Built-in template"
+        FAILED = "failed", "Generation failed"
+
+    class DeliveryStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+        UNKNOWN = "unknown", "Delivery unknown"
+
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="outbound_emails",
+    )
+    client_company = models.CharField(max_length=255, blank=True)
+    client_email = models.EmailField(blank=True)
+    campaign = models.ForeignKey(
+        OutreachCampaign,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="outbound_emails",
+    )
+    campaign_run = models.ForeignKey(
+        CampaignRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="outbound_emails",
+    )
+    team_member = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="outbound_emails",
+    )
+    recipient = models.EmailField()
+    subject = models.CharField(max_length=998)
+    body = models.TextField()
+    message_id = models.CharField(max_length=500, unique=True)
+    generation_mode = models.CharField(
+        max_length=30, choices=GenerationMode.choices
+    )
+    generation_error = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=DeliveryStatus.choices,
+        default=DeliveryStatus.PENDING,
+    )
+    followup_number = models.PositiveSmallIntegerField(null=True, blank=True)
+    idempotency_key = models.CharField(max_length=255, unique=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["recipient", "-created_at"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.recipient} - {self.subject} ({self.status})"
+
+    def save(self, *args, **kwargs):
+        if self.client_id:
+            self.client_company = self.client.company_name
+            self.client_email = self.client.email
+        super().save(*args, **kwargs)
 
 
 class LinkedInReachout(models.Model):

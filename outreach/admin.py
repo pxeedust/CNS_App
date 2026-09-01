@@ -6,6 +6,7 @@ from .models import (
     Client,
     EmailReply,
     LinkedInReachout,
+    OutboundEmail,
     OutreachCampaign,
     TeamMember,
 )
@@ -69,7 +70,7 @@ class ClientAdmin(admin.ModelAdmin):
 
 @admin.register(OutreachCampaign)
 class OutreachCampaignAdmin(admin.ModelAdmin):
-    list_display = ("name", "target_industry", "created_at")
+    list_display = ("name", "target_industry", "subject_template", "created_at")
     search_fields = ("name", "target_industry")
 
 
@@ -86,6 +87,8 @@ class CampaignRunAdmin(admin.ModelAdmin):
     list_display = (
         "pk",
         "status",
+        "operation",
+        "triggered_by",
         "total",
         "processed",
         "sent",
@@ -123,6 +126,7 @@ class TeamMemberAdmin(admin.ModelAdmin):
         "user__last_name",
         "user__email",
     )
+    exclude = ("mailbox_app_password",)
 
     @admin.display(description="Email")
     def get_email(self, obj):
@@ -152,3 +156,31 @@ class LinkedInReachoutAdmin(admin.ModelAdmin):
         "notes",
     )
     readonly_fields = ("created_at",)
+
+
+@admin.register(OutboundEmail)
+class OutboundEmailAdmin(admin.ModelAdmin):
+    list_display = (
+        "recipient",
+        "subject",
+        "generation_mode",
+        "status",
+        "team_member",
+        "sent_at",
+    )
+    list_filter = ("generation_mode", "status", "campaign")
+    search_fields = ("recipient", "subject", "client_company", "message_id")
+    readonly_fields = (
+        "recipient",
+        "subject",
+        "body",
+        "message_id",
+        "generation_mode",
+        "generation_error",
+        "status",
+        "idempotency_key",
+        "attempt_count",
+        "last_error",
+        "created_at",
+        "sent_at",
+    )

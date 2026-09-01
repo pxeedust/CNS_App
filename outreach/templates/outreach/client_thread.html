@@ -195,12 +195,12 @@
       <div class="card-header py-3 px-4" style="background-color: var(--dc-charcoal); color: #fff;">
         <h6 class="mb-0 fw-semibold">
           <i class="bi bi-send me-2"></i>Outgoing Activity
-          <span class="badge bg-light text-dark ms-2">{{ action_logs|length }}</span>
+          <span class="badge bg-light text-dark ms-2">{{ outbound_emails|length }}</span>
         </h6>
       </div>
       <div class="card-body p-4">
-        {% if action_logs %}
-          {% for log in action_logs %}
+        {% if outbound_emails %}
+          {% for outbound in outbound_emails %}
           <div class="d-flex gap-3 mb-3 pb-3 {% if not forloop.last %}border-bottom{% endif %}">
             <div class="flex-shrink-0">
               <span class="badge rounded-pill bg-light text-dc-green border">
@@ -208,10 +208,17 @@
               </span>
             </div>
             <div>
-              <div class="small text-muted">{{ log.emailed_at|date:"M d, Y H:i" }}</div>
-              <div class="small">{{ log.notes|truncatechars:200 }}</div>
-              {% if log.team_member %}
-                <div class="small text-muted">by {{ log.team_member.get_full_name|default:log.team_member.username }}</div>
+              <div class="small text-muted">{{ outbound.sent_at|default:outbound.created_at|date:"M d, Y H:i" }}</div>
+              <div class="small fw-semibold">{{ outbound.subject }}</div>
+              <div class="small mb-1">
+                <span class="badge text-bg-light border">{{ outbound.get_generation_mode_display }}</span>
+                <span class="badge {% if outbound.status == 'sent' %}text-bg-success{% elif outbound.status == 'failed' %}text-bg-danger{% else %}text-bg-secondary{% endif %}">{{ outbound.get_status_display }}</span>
+              </div>
+              <pre class="small bg-light rounded p-2" style="white-space: pre-wrap; font-family: inherit; max-height: 180px; overflow-y: auto;">{{ outbound.body|truncatechars:1500 }}</pre>
+              {% if outbound.generation_error %}<div class="small text-warning">Generation note: {{ outbound.generation_error }}</div>{% endif %}
+              {% if outbound.last_error %}<div class="small text-danger">Delivery error: {{ outbound.last_error }}</div>{% endif %}
+              {% if outbound.team_member %}
+                <div class="small text-muted">by {{ outbound.team_member.get_full_name|default:outbound.team_member.username }}</div>
               {% endif %}
             </div>
           </div>

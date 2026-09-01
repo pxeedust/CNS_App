@@ -1,11 +1,10 @@
 {% extends "outreach/base.html" %}
 
-{% block title %}Run Outreach Campaign — CNS Outreach{% endblock %}
+{% block title %}Run Outreach Campaign - CNS Outreach{% endblock %}
 
 {% block content %}
 <div class="row justify-content-center">
-  <div class="col-12 col-md-9 col-lg-6">
-
+  <div class="col-12 col-md-9 col-lg-7">
     <div class="mb-4">
       <a href="{% url 'outreach:dashboard' %}" class="text-decoration-none text-muted small">
         <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
@@ -14,133 +13,98 @@
 
     <div class="card shadow-sm border-0">
       <div class="card-header bg-dc-green text-white py-3 px-4">
-        <h5 class="mb-0 fw-semibold">
-          <i class="bi bi-send-fill me-2"></i>Run Outreach Campaign
-        </h5>
+        <h5 class="mb-0 fw-semibold"><i class="bi bi-send-fill me-2"></i>Run Outreach Campaign</h5>
       </div>
       <div class="card-body p-4">
-
-        <!-- AI / static badge -->
         {% if ai_enabled %}
-        <div class="alert alert-success d-flex align-items-center gap-2 mb-4 py-2">
-          <i class="bi bi-stars fs-5"></i>
-          <div>
-            <strong>Gemini AI active</strong> — each email will be individually personalised using the contact\'s company, industry, keywords, and website.
+          <div class="alert alert-success">
+            <strong>Gemini personalization is active.</strong> Each message is generated separately from the contact and company data, with Google Search grounding in the same Gemini request.
           </div>
-        </div>
         {% else %}
-        <div class="alert alert-warning d-flex align-items-center gap-2 mb-4 py-2">
-          <i class="bi bi-exclamation-triangle fs-5"></i>
-          <div>
-            <strong>AI not configured</strong> — set <code>GOOGLE_API_KEY</code> in your <code>.env</code> to enable Gemini personalisation. The static template will be used for now.
+          <div class="alert alert-warning">
+            <strong>Gemini is not configured.</strong> Set <code>GEMINI_API_KEY</code>.
+            {% if fallback_enabled %}Explicit static fallback is enabled.{% else %}Sending is blocked so generic template mail cannot be sent accidentally.{% endif %}
           </div>
-        </div>
         {% endif %}
 
-        <!-- Target summary -->
-        <div class="alert alert-info d-flex align-items-start gap-3 mb-4">
-          <i class="bi bi-info-circle-fill fs-5 mt-1 flex-shrink-0"></i>
-          <div>
-            <strong>{{ not_contacted_count }} client{{ not_contacted_count|pluralize }}</strong>
-            with status <em>Not Contacted</em> will receive an email.
-            Their status will automatically be updated to <em>Pinged</em> once sent.
-          </div>
+        <div class="alert alert-info">
+          <strong>{{ not_contacted_count }} eligible contact{{ not_contacted_count|pluralize }}</strong> are currently visible to your account. A selected campaign may narrow this by target industry.
         </div>
 
         {% if not_contacted_count == 0 %}
-          <div class="alert alert-warning mb-0">
-            <i class="bi bi-exclamation-triangle-fill me-2"></i>
-            No clients with status <em>Not Contacted</em> found. Import contacts or reset statuses first.
-          </div>
+          <div class="alert alert-warning mb-0">No contacts with status <em>Not Contacted</em> are eligible.</div>
         {% else %}
           <form method="post" novalidate>
             {% csrf_token %}
-
             <div class="mb-4">
-              <label for="campaign_id" class="form-label fw-semibold">
-                Email Template <span class="text-muted fw-normal">(optional)</span>
-              </label>
-              <select name="campaign_id" id="campaign_id" class="form-select">
-                <option value="">— Use built-in default template —</option>
-                {% for campaign in campaigns %}
-                  <option value="{{ campaign.pk }}">
-                    {{ campaign.name }} &nbsp;·&nbsp; {{ campaign.target_industry }}
-                  </option>
-                {% endfor %}
-              </select>
-              <div class="form-text">
-                Leave blank to use the standard 180DC IIT Kharagpur introduction template.
-              </div>
+              <label for="id_campaign_id" class="form-label fw-semibold">Campaign template <span class="text-muted fw-normal">(optional)</span></label>
+              {{ form.campaign_id }}
+              {% if form.campaign_id.errors %}<div class="text-danger small mt-1">{{ form.campaign_id.errors.0 }}</div>{% endif %}
+              <div class="form-text">Campaign subject/body templates are set in Django Admin under Outreach campaigns.</div>
             </div>
 
-            <!-- Target summary -->
-            <div class="alert alert-primary d-flex align-items-center gap-3 mb-4">
-              <i class="bi bi-people-fill fs-5 flex-shrink-0"></i>
-              <div>
-                <strong>{{ not_contacted_count }} client{{ not_contacted_count|pluralize }}</strong>
-                will be emailed. Statuses will update to <strong>Pinged</strong> as each send succeeds.
-              </div>
+            <div class="alert alert-primary">
+              <strong><span id="recipientCount">{{ not_contacted_count }}</span> contact(s)</strong> will be queued. Only successful deliveries move to <em>Pinged</em>.
             </div>
 
-            <!-- Confirmation checkbox -->
             <div class="form-check mb-4">
-              <input class="form-check-input" type="checkbox" id="confirmSend" required />
-              <label class="form-check-label" for="confirmSend">
-                I confirm I want to send outreach emails to
-                <strong>{{ not_contacted_count }} recipient{{ not_contacted_count|pluralize }}</strong>.
+              {{ form.confirm_send }}
+              <label class="form-check-label" for="id_confirm_send">
+                I confirm this bulk send to <strong><span id="confirmRecipientCount">{{ not_contacted_count }}</span> recipient(s)</strong>.
               </label>
+              {% if form.confirm_send.errors %}<div class="text-danger small mt-1">{{ form.confirm_send.errors.0 }}</div>{% endif %}
             </div>
 
-            <!-- Default template preview (collapsible) -->
             <div class="mb-4">
-              <a class="text-decoration-none text-muted small" data-bs-toggle="collapse"
-                 href="#templatePreview" role="button" aria-expanded="false"
-                 aria-controls="templatePreview">
-                <i class="bi bi-eye me-1"></i>Preview default template
+              <a class="text-decoration-none text-muted small" data-bs-toggle="collapse" href="#templatePreview">
+                <i class="bi bi-eye me-1"></i>Preview built-in fallback template
               </a>
               <div class="collapse mt-2" id="templatePreview">
-                <div class="card border-0 bg-light">
-                  <div class="card-body py-2 px-3">
-                    <p class="mb-1 small text-muted"><strong>Subject:</strong> {{ default_subject }}</p>
-                    <pre class="mb-0 small" style="white-space: pre-wrap; font-family: inherit;">{{ default_body }}</pre>
-                  </div>
-                </div>
-                <div class="form-text">
-                  <code>{title}</code> = job title from contact record (falls back to <em>Sir/Ma'am</em>),
-                  <code>{last_name}</code> = last name, <code>{company}</code>, <code>{industry}</code>.
-                </div>
+                <div class="card border-0 bg-light"><div class="card-body py-2 px-3">
+                  <p class="mb-1 small text-muted"><strong>Subject:</strong> {{ default_subject }}</p>
+                  <pre class="mb-0 small" style="white-space: pre-wrap; font-family: inherit;">{{ default_body }}</pre>
+                </div></div>
+                <div class="form-text">Custom templates support first name, full name, job title, company, industry, location, sender fields, and an AI body insertion slot.</div>
               </div>
             </div>
 
             <div class="d-flex gap-2">
               <button type="submit" id="launchBtn" class="btn btn-dc-green fw-semibold px-4" disabled>
-                <i class="bi bi-send-fill me-2"></i>Send Emails Now
+                <i class="bi bi-send-fill me-2"></i>Queue Campaign
               </button>
-              <a href="{% url 'outreach:dashboard' %}" class="btn btn-outline-secondary px-4">
-                Cancel
-              </a>
+              <a href="{% url 'outreach:dashboard' %}" class="btn btn-outline-secondary px-4">Cancel</a>
             </div>
-
           </form>
         {% endif %}
-
       </div>
     </div>
-
   </div>
 </div>
+{{ campaign_previews|json_script:"campaign-previews" }}
 {% endblock %}
 
 {% block extra_scripts %}
 <script>
-  // Only enable the Launch button once the confirmation checkbox is ticked
-  const checkbox = document.getElementById('confirmSend');
-  const btn = document.getElementById('launchBtn');
-  if (checkbox && btn) {
-    checkbox.addEventListener('change', () => {
-      btn.disabled = !checkbox.checked;
-    });
+  const checkbox = document.getElementById('id_confirm_send');
+  const launchButton = document.getElementById('launchBtn');
+  if (checkbox && launchButton) {
+    const updateButton = () => { launchButton.disabled = !checkbox.checked; };
+    checkbox.addEventListener('change', updateButton);
+    updateButton();
+  }
+
+  const previewNode = document.getElementById('campaign-previews');
+  const previews = previewNode ? JSON.parse(previewNode.textContent) : {};
+  const campaignSelect = document.getElementById('id_campaign_id');
+  const countNodes = [document.getElementById('recipientCount'), document.getElementById('confirmRecipientCount')];
+  if (campaignSelect) {
+    const updateCount = () => {
+      const selected = previews[campaignSelect.value];
+      const count = selected ? selected.recipient_count : {{ not_contacted_count }};
+      countNodes.forEach(node => { if (node) node.textContent = count; });
+    };
+    campaignSelect.addEventListener('change', updateCount);
+    updateCount();
   }
 </script>
 {% endblock %}
-

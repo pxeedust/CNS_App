@@ -2,34 +2,22 @@ import json
 import time
 import smtplib
 import os
+from getpass import getpass
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 
-# Create a credentials.py file (or update if it exists)
-def create_credentials_file():
-    """Create or update credentials.py file"""
-    if not os.path.exists("credentials.py"):
-        print("Creating credentials.py file...")
-
-        # Get Gmail credentials
-        email = (
-            input("Enter your Gmail address (parthsethi@180dc.org): ")
-            or "parthsethi@180dc.org"
-        )
-        password = input("Enter your Gmail app password: ")
-
-        # Write to file
-        with open("credentials.py", "w") as f:
-            f.write(f"# Gmail SMTP credentials\n")
-            f.write(f"sender_email = '{email}'\n")
-            f.write(f"sender_password = '{password}'\n")
-            f.write(f"smtp_server = 'smtp.gmail.com'\n")
-            f.write(f"smtp_port = 587\n")
-
-        print("Credentials file created successfully!")
-    else:
-        print("credentials.py file already exists")
+def load_credentials():
+    """Read credentials from environment or an interactive hidden prompt."""
+    sender_email = os.getenv("EMAIL_HOST_USER", "").strip()
+    sender_password = os.getenv("EMAIL_HOST_PASSWORD", "")
+    if not sender_email:
+        sender_email = input("Enter your Gmail address: ").strip()
+    if not sender_password:
+        sender_password = getpass("Enter your Gmail app password (hidden): ").replace(" ", "")
+    if not sender_email or not sender_password:
+        raise RuntimeError("Mailbox email and app password are required.")
+    return sender_email, sender_password, os.getenv("EMAIL_HOST", "smtp.gmail.com"), int(os.getenv("EMAIL_PORT", "587"))
 
 
 def read_emails_from_json(json_file_path):
@@ -88,18 +76,18 @@ def main():
     print("This script uses Python's smtplib to send emails via Gmail")
     print("=" * 80)
 
-    # Make sure credentials file exists
-    create_credentials_file()
-
-    # Import credentials after creating the file if needed
     try:
-        from credentials import sender_email, sender_password, smtp_server, smtp_port
-    except ImportError:
-        print("Error importing credentials. Please check your credentials.py file.")
+        sender_email, sender_password, smtp_server, smtp_port = load_credentials()
+    except RuntimeError as exc:
+        print(exc)
         return
 
     # Set CC emails
-    cc_emails = ["arghyadip.pal@180dc.org", "mishra.moulik@180dc.org"]
+    cc_emails = [
+        value.strip()
+        for value in os.getenv("OUTREACH_CC_EMAILS", "").split(",")
+        if value.strip()
+    ]
 
     # Read emails from JSON file
     json_file_path = "generated_emails.json"

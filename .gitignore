@@ -19,6 +19,14 @@ venv/
 db.sqlite3
 *.log
 media/
+staticfiles/
+generated_emails*.json
+generated_emails*.txt
+failed_recipients*.json
+apollo_contacts*.csv
+!apollo_contacts.example.csv
+*.xlsx
+*.xls
 
 # Celery filesystem broker messages
 celery_broker/*

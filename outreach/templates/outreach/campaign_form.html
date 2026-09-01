@@ -1,0 +1,32 @@
+{% extends "outreach/base.html" %}
+{% block title %}{% if campaign %}Edit{% else %}New{% endif %} Campaign Template - CNS Outreach{% endblock %}
+{% block nav_campaigns %}active{% endblock %}
+{% block content %}
+<div class="row justify-content-center"><div class="col-12 col-lg-8">
+  <a href="{% url 'outreach:campaign_list' %}" class="text-decoration-none text-muted small"><i class="bi bi-arrow-left me-1"></i>Back to Templates</a>
+  <div class="card shadow-sm border-0 mt-3">
+    <div class="card-header bg-dc-green text-white py-3 px-4"><h5 class="mb-0">{% if campaign %}Edit{% else %}New{% endif %} Campaign Template</h5></div>
+    <div class="card-body p-4">
+      <form method="post" novalidate>{% csrf_token %}
+        {% for field in form %}
+          <div class="mb-3">
+            <label for="{{ field.id_for_label }}" class="form-label fw-semibold">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
+            {% for error in field.errors %}<div class="text-danger small">{{ error }}</div>{% endfor %}
+          </div>
+        {% endfor %}
+        <div class="alert alert-light border small">
+          Use placeholders such as <code>{% templatetag openvariable %}first_name{% templatetag closevariable %}</code>,
+          <code>{% templatetag openvariable %}company{% templatetag closevariable %}</code>,
+          <code>{% templatetag openvariable %}industry{% templatetag closevariable %}</code>, and
+          <code>{% templatetag openvariable %}sender_name{% templatetag closevariable %}</code>.
+          Add <code>{% templatetag openvariable %}email_body{% templatetag closevariable %}</code> where the Gemini-personalized body should appear.
+          Use <strong>All</strong> as the target industry to include every eligible contact.
+        </div>
+        <button class="btn btn-dc-green" type="submit"><i class="bi bi-check-lg me-1"></i>Save Template</button>
+      </form>
+    </div>
+  </div>
+</div></div>
+{% endblock %}

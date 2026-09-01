@@ -16,6 +16,9 @@ urlpatterns = [
         name="update_client_status",
     ),
     path("campaigns/run/", views.run_campaign, name="run_campaign"),
+    path("campaigns/", views.campaign_list, name="campaign_list"),
+    path("campaigns/new/", views.campaign_edit, name="campaign_add"),
+    path("campaigns/<int:pk>/edit/", views.campaign_edit, name="campaign_edit"),
     path(
         "campaigns/progress/<int:run_id>/",
         views.campaign_progress_page,

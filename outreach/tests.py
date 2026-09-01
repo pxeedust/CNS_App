@@ -242,7 +242,9 @@ class PersonalizedFollowupTests(TestCase):
         )
 
     @patch("outreach.tasks._send_single_email")
-    @override_settings(GOOGLE_API_KEY="")
+    @override_settings(
+        GEMINI_API_KEY="", GOOGLE_API_KEY="", ALLOW_STATIC_EMAIL_FALLBACK=True
+    )
     def test_followups_use_logged_in_user_mailbox_and_scope(self, mock_send):
         captured = {}
 

@@ -1,0 +1,31 @@
+{% extends "outreach/base.html" %}
+{% block title %}Campaign Templates - CNS Outreach{% endblock %}
+{% block nav_campaigns %}active{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h4 class="mb-1 fw-bold text-dc-green">Campaign Templates</h4>
+    <div class="text-muted small">Subject, body guidance, and recipient industry targeting are configured here.</div>
+  </div>
+  <a href="{% url 'outreach:campaign_add' %}" class="btn btn-dc-green"><i class="bi bi-plus-lg me-1"></i>New Template</a>
+</div>
+<div class="card shadow-sm border-0">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead><tr><th>Name</th><th>Target industry</th><th>Subject</th><th class="text-end">Action</th></tr></thead>
+      <tbody>
+        {% for campaign in campaigns %}
+          <tr>
+            <td class="fw-semibold">{{ campaign.name }}</td>
+            <td>{{ campaign.target_industry }}</td>
+            <td><code>{{ campaign.subject_template|truncatechars:70 }}</code></td>
+            <td class="text-end"><a class="btn btn-sm btn-outline-dc-green" href="{% url 'outreach:campaign_edit' campaign.pk %}"><i class="bi bi-pencil me-1"></i>Edit</a></td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="4" class="text-center text-muted py-4">No custom campaign templates yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

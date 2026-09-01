@@ -15,7 +15,7 @@
     <div class="card shadow-sm border-0">
       <div class="card-header bg-dc-green text-white py-3 px-4 d-flex align-items-center justify-content-between">
         <h5 class="mb-0 fw-semibold">
-          <i class="bi bi-send-fill me-2"></i>Campaign Run #{{ run.pk }}
+          <i class="bi bi-send-fill me-2"></i>{{ run.get_operation_display }} #{{ run.pk }}
         </h5>
         <span id="statusBadge" class="badge bg-warning text-dark">Running</span>
       </div>
@@ -49,7 +49,7 @@
           <div class="col-4">
             <div class="border rounded p-3">
               <div class="fs-3 fw-bold text-success" id="sentCount">0</div>
-              <div class="text-muted small">Sent</div>
+              <div class="text-muted small">{% if run.operation == "reply_scan" %}Replies found{% else %}Sent{% endif %}</div>
             </div>
           </div>
           <div class="col-4">
@@ -110,6 +110,9 @@
   let polling = true;
 
   const STEP_LABELS = {
+    'starting':     '<i class="bi bi-hourglass me-1"></i>Starting…',
+    'scanning':     '<i class="bi bi-inbox me-1"></i>Scanning mailbox…',
+    'queueing':     '<i class="bi bi-cloud-arrow-up me-1"></i>Queueing task…',
     'researching': '<i class="bi bi-search me-1"></i>Researching company…',
     'generating':  '<i class="bi bi-stars me-1"></i>Generating AI email…',
     'sending':     '<i class="bi bi-envelope-arrow-up me-1"></i>Sending email…',
@@ -142,7 +145,8 @@
     if (data.log && data.log.length > lastLogLength) {
       if (lastLogLength === 0) logContainer.innerHTML = '';
       for (let i = lastLogLength; i < data.log.length; i++) {
-        const entry = data.log[i];
+        const rawEntry = data.log[i];
+        const entry = typeof rawEntry === 'string' ? {detail: rawEntry, status: 'info'} : rawEntry;
         const div = document.createElement('div');
         div.className = 'mb-1';
         let icon, cls;
@@ -175,13 +179,13 @@
         statusBadge.className = 'badge bg-success';
         statusBadge.textContent = 'Completed';
         currentStep.className = 'alert alert-success d-flex align-items-center gap-2 mb-3';
-        stepText.innerHTML = '<i class="bi bi-check-circle-fill me-1"></i>All emails processed!';
+        stepText.innerHTML = '<i class="bi bi-check-circle-fill me-1"></i>Operation completed.';
       } else {
         progressBar.style.backgroundColor = '#dc3545';
         statusBadge.className = 'badge bg-danger';
         statusBadge.textContent = 'Failed';
         currentStep.className = 'alert alert-danger d-flex align-items-center gap-2 mb-3';
-        stepText.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-1"></i>Campaign failed.';
+        stepText.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-1"></i>' + escapeHtml(data.error_message || 'Operation failed.');
       }
 
       // Hide spinner

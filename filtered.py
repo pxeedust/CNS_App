@@ -1,38 +1,38 @@
+"""Filter generated email JSON using a separate failed-recipient file.
+
+Usage:
+    python filtered.py generated_emails.json failed_recipients.txt --output retry_emails.json
+
+The failed-recipient file must contain one email address per line. This helper
+never overwrites the source file and contains no real contact data.
+"""
+
+import argparse
 import json
+from pathlib import Path
 
-# List of email addresses for the failed recipients
-failed_emails = [
-    "ketan@hopelectric.in",
-    "dhruvil.sheth@tractorseva.com",
-    "sanjeev@e3electric.ai",
-    "ajit.patil@rivotmotors.com",
-    "gopi@badboyev.in",
-    "vimal@readyassist.in",
-    "rajeev.mehtani@yatis.in",
-    "himanshu.arya@myluxurycart.com",
-    "shree@halamobility.in",
-    "dinesh@raptee.com",
-    "nikhil.gonsalves@ingoelectric.com",
-    "satish@autorounders.com",
-    "sandeep.yadav@yahhvi.com",
-    "kaustubh@autonxt.in",
-    "silambarasan@towman.in",
-    "mayank@efill.co.in",
-    "vivek@buymyev.in",
-    "divyansh@bmrev.in",
-]
 
-# Load the original JSON file
-with open("generated_emails.json", "r") as f:
-    all_emails = json.load(f)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("source", type=Path)
+    parser.add_argument("failed", type=Path)
+    parser.add_argument("--output", type=Path, default=Path("retry_emails.json"))
+    args = parser.parse_args()
 
-# Filter to keep only the failed recipients
-filtered_emails = [
-    email for email in all_emails if email.get("email_address") in failed_emails
-]
+    failed = {
+        line.strip().lower()
+        for line in args.failed.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    records = json.loads(args.source.read_text(encoding="utf-8"))
+    filtered = [
+        record
+        for record in records
+        if str(record.get("email_address", "")).strip().lower() in failed
+    ]
+    args.output.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
+    print(f"Wrote {len(filtered)} records to {args.output}")
 
-# Save the filtered data back to the JSON file
-with open("generated_emails.json", "w") as f:
-    json.dump(filtered_emails, f, indent=2)
 
-print(f"Filtered JSON file saved with {len(filtered_emails)} entries")
+if __name__ == "__main__":
+    main()

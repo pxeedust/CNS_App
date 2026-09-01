@@ -1,6 +1,7 @@
 import smtplib
 import ssl
 import time
+from getpass import getpass
 
 
 def test_gmail_connection(email, password, test_mode=1):
@@ -44,7 +45,10 @@ def main():
     print("GMAIL CONNECTION DIAGNOSTIC TOOL")
     print("=" * 80)
 
-    email = "parthsethi@180dc.org"
+    email = input("\nEnter the Gmail/Workspace address to test: ").strip()
+    if not email:
+        print("An email address is required.")
+        return
 
     print("\nThis tool will try different methods to connect to Gmail.")
     print("For this to work, you MUST:")
@@ -52,7 +56,7 @@ def main():
     print("2. Have generated an App Password for mail")
 
     # Check if using regular password
-    password = input("\nEnter your App Password (16 characters, no spaces): ")
+    password = getpass("\nEnter your App Password (input is hidden): ").replace(" ", "")
     if len(password) != 16 or " " in password:
         print("WARNING: This doesn't look like a valid App Password.")
         print("App Passwords should be exactly 16 characters with no spaces.")
@@ -68,7 +72,7 @@ def main():
         if test_gmail_connection(email, password, method):
             success = True
             print(
-                f"\nMethod {method} was successful! Use these settings in credentials.py:"
+                f"\nMethod {method} was successful. Use these mailbox settings in the app:"
             )
 
             if method == 1:

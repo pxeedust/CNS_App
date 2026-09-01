@@ -1,5 +1,5 @@
 import pandas as pd
-import google.generativeai as genai
+from google import genai
 import os
 from dotenv import load_dotenv
 import time
@@ -9,9 +9,11 @@ import json
 # Load environment variables from .env file
 load_dotenv()
 
-# Configure Google Generative AI with your API key - Fix this line
-# Option 1: Use an environment variable (recommended for security)
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+def _gemini_client():
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set GEMINI_API_KEY before generating email content.")
+    return genai.Client(api_key=api_key)
 
 
 # Function to read spreadsheet data with better error handling
@@ -80,8 +82,9 @@ def generate_email(contact, template_info, model="models/gemini-2.5-flash"):
 
     try:
         # Generate company research
-        research_model = genai.GenerativeModel(model)
-        research_response = research_model.generate_content(company_research_prompt)
+        research_response = _gemini_client().models.generate_content(
+            model=model.removeprefix("models/"), contents=company_research_prompt
+        )
         company_highlight = research_response.text.strip()
     except Exception as e:
         print(f"Error generating company research: {e}")
@@ -118,8 +121,9 @@ def generate_email(contact, template_info, model="models/gemini-2.5-flash"):
     """
 
     # Generate email using Gemini
-    model = genai.GenerativeModel(model)
-    response = model.generate_content(prompt)
+    response = _gemini_client().models.generate_content(
+        model=model.removeprefix("models/"), contents=prompt
+    )
 
     # Parse response to separate subject and body
     content = response.text.strip()
@@ -310,7 +314,7 @@ def main():
         - Explain our consultants offer fresh, analytical perspectives to address business challenges
         - Request for a brief call to discuss strategic priorities and potential collaboration
         """,
-        "template": """Respected $TITLE $LAST_NAME,
+        "template": """Hello $FIRST_NAME,
 
 I am Parth Sethi, Executive Head at 180 Degrees Consulting, IIT Kharagpur. $EMAIL_BODY
 
