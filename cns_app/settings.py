@@ -85,7 +85,7 @@ if IS_PRODUCTION and (
 SECRET_KEY = _configured_secret_key or "django-insecure-development-only-change-me"
 
 # SECURITY WARNING: never enable DEBUG in production.
-DEBUG = _env_bool("DEBUG", default=False)
+DEBUG = _env_bool("DEBUG", default=not IS_PRODUCTION)
 if IS_PRODUCTION and DEBUG:
     raise ImproperlyConfigured("DEBUG must be False when DJANGO_ENV=production.")
 
@@ -212,10 +212,14 @@ STORAGES = {
         "BACKEND": (
             "whitenoise.storage.CompressedManifestStaticFilesStorage"
             if IS_PRODUCTION
-            else "whitenoise.storage.CompressedStaticFilesStorage"
+            else "django.contrib.staticfiles.storage.StaticFilesStorage"
         ),
     },
 }
+# In development, serve assets directly from app static directories. Production
+# remains manifest-backed and requires collectstatic during the build.
+WHITENOISE_USE_FINDERS = not IS_PRODUCTION
+WHITENOISE_AUTOREFRESH = not IS_PRODUCTION
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -249,7 +253,11 @@ OUTREACH_CC_EMAILS = os.getenv("OUTREACH_CC_EMAILS", "")  # comma-separated
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY", "") or GOOGLE_API_KEY).strip()
 GOOGLE_CLOUD_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GOOGLE_GENAI_USE_VERTEXAI = _env_bool("GOOGLE_GENAI_USE_VERTEXAI", False)
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "global").strip()
+
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 GEMINI_REQUEST_TIMEOUT_SECONDS = _env_int("GEMINI_REQUEST_TIMEOUT_SECONDS", 60)
 GEMINI_MAX_RETRIES = _env_int("GEMINI_MAX_RETRIES", 3)
 GEMINI_RETRY_BASE_SECONDS = _env_float("GEMINI_RETRY_BASE_SECONDS", 0.5)

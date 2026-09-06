@@ -10,10 +10,16 @@ import json
 load_dotenv()
 
 def _gemini_client():
+    if os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in {"true", "1", "yes", "on"}:
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+        if not project:
+            raise RuntimeError("Set GOOGLE_CLOUD_PROJECT for Vertex AI.")
+        return genai.Client(vertexai=True, project=project,
+                            location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"))
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError("Set GEMINI_API_KEY before generating email content.")
-    return genai.Client(api_key=api_key)
+    return genai.Client(vertexai=False, api_key=api_key)
 
 
 # Function to read spreadsheet data with better error handling
@@ -57,7 +63,7 @@ def load_contacts(file_path):
 
 
 # Function to generate personalized email using Gemini
-def generate_email(contact, template_info, model="models/gemini-2.5-flash"):
+def generate_email(contact, template_info, model=None):
     """Generate a personalized email using Gemini model."""
 
     # Extract relevant fields for email personalization
@@ -82,8 +88,9 @@ def generate_email(contact, template_info, model="models/gemini-2.5-flash"):
 
     try:
         # Generate company research
-        research_response = _gemini_client().models.generate_content(
-            model=model.removeprefix("models/"), contents=company_research_prompt
+        research_client = _gemini_client()
+        research_response = research_client.models.generate_content(
+            model=(model or os.getenv("GEMINI_MODEL", "gemini-3.6-flash")).removeprefix("models/"), contents=company_research_prompt
         )
         company_highlight = research_response.text.strip()
     except Exception as e:
@@ -121,8 +128,9 @@ def generate_email(contact, template_info, model="models/gemini-2.5-flash"):
     """
 
     # Generate email using Gemini
-    response = _gemini_client().models.generate_content(
-        model=model.removeprefix("models/"), contents=prompt
+    email_client = _gemini_client()
+    response = email_client.models.generate_content(
+        model=(model or os.getenv("GEMINI_MODEL", "gemini-3.6-flash")).removeprefix("models/"), contents=prompt
     )
 
     # Parse response to separate subject and body

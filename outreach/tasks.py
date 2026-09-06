@@ -353,14 +353,31 @@ _EMAIL_RESPONSE_SCHEMA = {
 
 
 def _gemini_model_name() -> str:
-    return getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
+    return getattr(settings, "GEMINI_MODEL", "gemini-3.6-flash")
+
+
+def _gemini_configured() -> bool:
+    if _bool_setting("GOOGLE_GENAI_USE_VERTEXAI"):
+        return bool(getattr(settings, "GOOGLE_CLOUD_PROJECT", ""))
+    return bool(_get_gemini_api_key())
 
 
 def _new_gemini_client(api_key: str):
     timeout_ms = _bounded_int_setting(
         "GEMINI_REQUEST_TIMEOUT_SECONDS", 60, 1, 120
     ) * 1000
+    if _bool_setting("GOOGLE_GENAI_USE_VERTEXAI"):
+        project = getattr(settings, "GOOGLE_CLOUD_PROJECT", "")
+        if not project:
+            raise ValueError("Set GOOGLE_CLOUD_PROJECT for Vertex AI.")
+        return genai.Client(
+            vertexai=True,
+            project=project,
+            location=getattr(settings, "GOOGLE_CLOUD_LOCATION", "global"),
+            http_options=types.HttpOptions(timeout=timeout_ms),
+        )
     return genai.Client(
+        vertexai=False,
         api_key=api_key,
         http_options=types.HttpOptions(timeout=timeout_ms),
     )
@@ -425,7 +442,27 @@ def _generate_content_with_retry(ai_client, *, model: str, contents: str, config
     raise RuntimeError("Gemini retry loop exited unexpectedly")
 
 
+def _email_generation_config(*, use_search=False):
+    options = dict(
+        temperature=0.35,
+        max_output_tokens=4096,
+        response_mime_type="application/json",
+        response_json_schema=_EMAIL_RESPONSE_SCHEMA,
+    )
+    if _gemini_model_name().removeprefix("models/").startswith("gemini-3"):
+        options["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
+    if use_search:
+        options["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+    return types.GenerateContentConfig(**options)
+
+
 def _parse_structured_email_response(response) -> tuple[str, str]:
+    candidates = getattr(response, "candidates", None)
+    if isinstance(candidates, (list, tuple)) and candidates:
+        reason = getattr(candidates[0], "finish_reason", None)
+        reason = getattr(reason, "value", reason)
+        if reason and reason != "STOP":
+            raise ValueError(f"Gemini email generation did not finish: {reason}")
     parsed = getattr(response, "parsed", None)
     if hasattr(parsed, "model_dump"):
         parsed = parsed.model_dump()
@@ -438,6 +475,8 @@ def _parse_structured_email_response(response) -> tuple[str, str]:
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValueError("Gemini returned invalid structured email JSON") from exc
 
+    if not isinstance(parsed, dict):
+        raise ValueError("Gemini email response must be a JSON object")
     subject = parsed.get("subject")
     body = parsed.get("body")
     if not isinstance(subject, str) or not isinstance(body, str):
@@ -564,7 +603,7 @@ def _generate_initial_email_result(
     campaign=None,
 ) -> EmailGenerationResult:
     api_key = _get_gemini_api_key()
-    if not api_key:
+    if not _gemini_configured():
         return _fallback_generation(
             client,
             sender_profile,
@@ -577,13 +616,7 @@ def _generate_initial_email_result(
             client, sender_profile, campaign
         )
         ai_client = _new_gemini_client(api_key)
-        config = types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            temperature=0.35,
-            max_output_tokens=1200,
-            response_mime_type="application/json",
-            response_json_schema=_EMAIL_RESPONSE_SCHEMA,
-        )
+        config = _email_generation_config(use_search=True)
         response = _generate_content_with_retry(
             ai_client,
             model=_gemini_model_name(),
@@ -637,7 +670,7 @@ def check_gemini_connection() -> dict[str, object]:
     """Perform one minimal, bounded Gemini request without exposing credentials."""
     api_key = _get_gemini_api_key()
     model_name = _gemini_model_name()
-    if not api_key:
+    if not _gemini_configured():
         return {"ok": False, "model": model_name, "error": "API key is not configured."}
     try:
         client = _new_gemini_client(api_key)
@@ -703,7 +736,7 @@ def _generate_ai_email(client, sender_profile, campaign=None) -> tuple[str, str]
     return result.subject, result.body
 
     api_key = _get_gemini_api_key()
-    if not api_key:
+    if not _gemini_configured():
         logger.warning(
             "GOOGLE_API_KEY not configured — falling back to static template for client %s.",
             client.pk,
@@ -1412,7 +1445,7 @@ def _analyze_reply_sentiment(reply_text, company_name):
     Returns (sentiment_label, summary_text).
     """
     api_key = _get_gemini_api_key()
-    if not api_key or not reply_text.strip():
+    if not _gemini_configured() or not reply_text.strip():
         return Client.Sentiment.UNKNOWN, ""
 
     try:
@@ -1867,7 +1900,7 @@ def _generate_followup_email(client, followup_number, sender_profile) -> tuple[s
         followup_number, f"#{followup_number}"
     )
 
-    if not api_key:
+    if not _gemini_configured():
         subject = f"Following up — 180DC IIT Kharagpur X {company}"
         parts = client.contact_person.split()
         last_name = parts[-1] if parts else client.contact_person
@@ -1889,8 +1922,8 @@ def _generate_followup_email(client, followup_number, sender_profile) -> tuple[s
         return subject, body
 
     try:
-        ai_client = genai.Client(api_key=api_key)
-        model_name = getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
+        ai_client = _new_gemini_client(api_key)
+        model_name = getattr(settings, "GEMINI_MODEL", "gemini-3.6-flash")
 
         parts = client.contact_person.split()
         first_name = parts[0] if parts else ""
@@ -2107,7 +2140,7 @@ def _static_followup_result(client, followup_number, sender_profile, error=""):
 
 def _generate_followup_result(client, followup_number, sender_profile):
     api_key = _get_gemini_api_key()
-    if not api_key:
+    if not _gemini_configured():
         return _static_followup_result(
             client,
             followup_number,
@@ -2137,12 +2170,7 @@ def _generate_followup_result(client, followup_number, sender_profile):
             ai_client,
             model=_gemini_model_name(),
             contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=900,
-                response_mime_type="application/json",
-                response_json_schema=_EMAIL_RESPONSE_SCHEMA,
-            ),
+            config=_email_generation_config(),
         )
         subject, body = _parse_structured_email_response(response)
         subject = _render_campaign_template(subject, context)

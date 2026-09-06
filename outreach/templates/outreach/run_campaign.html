@@ -22,7 +22,7 @@
           </div>
         {% else %}
           <div class="alert alert-warning">
-            <strong>Gemini is not configured.</strong> Set <code>GEMINI_API_KEY</code>.
+            <strong>Gemini is not configured.</strong> Configure Vertex AI with a Google Cloud project, or set <code>GEMINI_API_KEY</code> for the Developer API.
             {% if fallback_enabled %}Explicit static fallback is enabled.{% else %}Sending is blocked so generic template mail cannot be sent accidentally.{% endif %}
           </div>
         {% endif %}

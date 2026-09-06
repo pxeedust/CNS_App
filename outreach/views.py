@@ -532,7 +532,11 @@ def run_campaign(request):
         "not_contacted_count": not_contacted_count,
         "default_subject": _DEFAULT_SUBJECT_TPL,
         "default_body": _DEFAULT_BODY_TPL,
-        "ai_enabled": bool(getattr(settings, "GEMINI_API_KEY", "")),
+        "ai_enabled": (
+            bool(settings.GOOGLE_CLOUD_PROJECT)
+            if settings.GOOGLE_GENAI_USE_VERTEXAI
+            else bool(getattr(settings, "GEMINI_API_KEY", ""))
+        ),
         "fallback_enabled": bool(
             getattr(settings, "ALLOW_STATIC_EMAIL_FALLBACK", False)
         ),

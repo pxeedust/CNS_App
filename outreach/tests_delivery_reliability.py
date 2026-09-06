@@ -228,3 +228,15 @@ class ReplyThreadMatchingTests(TestCase):
 
         self.assertEqual(parsed["client"], client)
         self.assertEqual(parsed["outbound_email"], outbound)
+
+
+@override_settings(
+    DEBUG=False,
+    WHITENOISE_USE_FINDERS=True,
+    WHITENOISE_AUTOREFRESH=True,
+)
+class DevelopmentStaticFilesTests(TestCase):
+    def test_application_stylesheet_is_served_without_collectstatic(self):
+        response = self.client.get("/static/outreach/css/app.css")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Type"], 'text/css; charset="utf-8"')
