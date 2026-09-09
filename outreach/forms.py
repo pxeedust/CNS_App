@@ -282,6 +282,10 @@ class CreateUserForm(forms.Form):
 class EditUserForm(forms.Form):
     """Form for admins to edit an existing team member."""
 
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.user = user
+
     first_name = forms.CharField(
         max_length=150, widget=forms.TextInput(attrs=_TEXT_INPUT)
     )
@@ -328,6 +332,15 @@ class EditUserForm(forms.Form):
         widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
         label="Account active",
     )
+
+    def clean_email(self):
+        email = self.cleaned_data["email"]
+        users = User.objects.filter(email__iexact=email)
+        if self.user is not None:
+            users = users.exclude(pk=self.user.pk)
+        if users.exists():
+            raise forms.ValidationError("A user with this email already exists.")
+        return email
 
 
 class MailboxSettingsForm(forms.Form):

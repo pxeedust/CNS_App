@@ -166,6 +166,33 @@ class CredentialAndAuthorizationTests(TestCase):
         self.profile.refresh_from_db()
         self.assertEqual(self.profile.mailbox_app_password, "keep-this-secret")
 
+    def test_admin_can_edit_existing_team_member(self):
+        self.profile.role = TeamMember.Role.ADMIN
+        self.profile.save(update_fields=["role"])
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            reverse("outreach:team_edit", args=[self.profile.pk]),
+            {
+                "first_name": "Updated",
+                "last_name": "Owner",
+                "email": "owner@example.test",
+                "sender_name": "Updated Owner",
+                "sender_role": "Lead",
+                "mailbox_email": "owner@example.test",
+                "mailbox_app_password": "",
+                "role": TeamMember.Role.ADMIN,
+                "is_active": "on",
+            },
+        )
+
+        self.assertRedirects(response, reverse("outreach:team_list"))
+        self.owner.refresh_from_db()
+        self.profile.refresh_from_db()
+        self.assertEqual(self.owner.first_name, "Updated")
+        self.assertEqual(self.profile.role, TeamMember.Role.ADMIN)
+        self.assertEqual(self.profile.mailbox_app_password, "keep-this-secret")
+
     def test_member_cannot_read_another_members_campaign_progress(self):
         run = CampaignRun.objects.create(triggered_by=self.owner)
         self.client.force_login(self.other)
