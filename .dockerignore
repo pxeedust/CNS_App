@@ -1,0 +1,10 @@
+**
+!requirements.txt
+!manage.py
+!cns_app/
+!cns_app/**
+!outreach/
+!outreach/**
+**/__pycache__/
+**/*.pyc
+**/.env*

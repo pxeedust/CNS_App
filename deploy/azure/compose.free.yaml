@@ -1,0 +1,55 @@
+services:
+  db:
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=192MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - max_connections=30
+
+  redis:
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 96mb
+      - --maxmemory-policy
+      - noeviction
+
+  web:
+    command:
+      - gunicorn
+      - cns_app.wsgi:application
+      - --bind
+      - 0.0.0.0:8000
+      - --workers
+      - "1"
+      - --threads
+      - "2"
+      - --timeout
+      - "120"
+      - --max-requests
+      - "250"
+      - --max-requests-jitter
+      - "25"
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+
+  worker:
+    command:
+      - celery
+      - -A
+      - cns_app
+      - worker
+      - --loglevel=info
+      - --concurrency=1
+      - --max-tasks-per-child=50

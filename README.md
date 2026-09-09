@@ -310,6 +310,13 @@ On Windows, Celery may require a compatible worker pool or a Linux/WSL/Docker en
 
 ## Production deployment
 
+For Azure for Students, follow the [Azure deployment guide](deploy/azure/README.md),
+including student-credit limits, VM creation and the Azure-provided hostname.
+
+For a shared Oracle Cloud VM with HTTPS, PostgreSQL, Redis and a Celery worker,
+follow the [Oracle deployment guide](deploy/oracle/README.md). The repository
+includes a Dockerfile, Compose stack and deployment script for that setup.
+
 Production should set at least:
 
 ```dotenv
