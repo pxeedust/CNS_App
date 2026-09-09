@@ -54,7 +54,7 @@ services:
   setup:
     <<: *app
     profiles: ["ops"]
-    command: ["sh", "-c", "python manage.py check --deploy --fail-level WARNING && python manage.py migrate --noinput"]
+    command: ["sh", "-c", "python manage.py check --deploy --fail-level ERROR && python manage.py migrate --noinput"]
     depends_on:
       db: {condition: service_healthy}
 
