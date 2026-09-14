@@ -1,5 +1,6 @@
 from datetime import timedelta
 from email.message import EmailMessage
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
@@ -10,6 +11,8 @@ from django.utils import timezone
 from .models import CampaignRun, Client, OutboundEmail, OutreachCampaign, TeamMember
 from .tasks import (
     EmailGenerationResult,
+    _analyze_reply_sentiment,
+    _generate_initial_email_result,
     _process_imap_message,
     send_automated_pings,
 )
@@ -39,7 +42,11 @@ class InitialCampaignReliabilityTests(TestCase):
             assigned_to=self.user,
         )
 
-    @override_settings(GEMINI_API_KEY="")
+    @override_settings(
+        GEMINI_API_KEY="",
+        GOOGLE_API_KEY="",
+        GOOGLE_GENAI_USE_VERTEXAI=False,
+    )
     def test_campaign_launch_page_renders_bound_form_and_safety_state(self):
         self.client.force_login(self.user)
         response = self.client.get(reverse("outreach:run_campaign"))
@@ -133,6 +140,53 @@ class InitialCampaignReliabilityTests(TestCase):
         self.assertEqual(result["sent"], 0)
         mock_generate.assert_not_called()
         mock_send.assert_not_called()
+
+    @override_settings(
+        GEMINI_API_KEY="test-key",
+        GOOGLE_GENAI_USE_VERTEXAI=False,
+        ALLOW_STATIC_EMAIL_FALLBACK=False,
+    )
+    @patch("outreach.tasks._new_gemini_client")
+    def test_pro_bono_ai_copy_is_rejected_before_delivery(self, mock_client):
+        mock_client.return_value.models.generate_content.return_value = SimpleNamespace(
+            parsed={
+                "subject": "180DC IIT Kharagpur X Personalized Co",
+                "body": "Hello Alex,\n\nWe offer pro-bono consulting support.",
+            }
+        )
+        sender_profile = {
+            "sender_name": "Test Sender",
+            "sender_role": "Outreach Lead",
+            "mailbox_email": "sender@example.test",
+        }
+
+        result = _generate_initial_email_result(
+            self.client_record, sender_profile
+        )
+
+        self.assertFalse(result.can_send)
+        self.assertEqual(result.mode, "failed")
+        self.assertIn("prohibited pro-bono", result.error)
+
+    @override_settings(
+        GEMINI_API_KEY="test-key",
+        GOOGLE_GENAI_USE_VERTEXAI=False,
+    )
+    @patch("outreach.tasks._new_gemini_client")
+    def test_sentiment_uses_structured_gemini_response(self, mock_client):
+        mock_client.return_value.models.generate_content.return_value = SimpleNamespace(
+            parsed={
+                "sentiment": "Interested",
+                "summary": "The recipient asked to arrange a call.",
+            }
+        )
+
+        sentiment, summary = _analyze_reply_sentiment(
+            "Please send some times for a call.", "Personalized Co"
+        )
+
+        self.assertEqual(sentiment, Client.Sentiment.INTERESTED)
+        self.assertEqual(summary, "The recipient asked to arrange a call.")
 
 
 @override_settings(MAILBOX_ENCRYPTION_KEY="delivery-test-key")

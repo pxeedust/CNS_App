@@ -4,13 +4,15 @@ import io
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.views import LoginView
+from django.contrib.auth.views import LoginView, PasswordChangeView
+from django.contrib.messages.views import SuccessMessageMixin
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Max, Q, Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse_lazy
 from django.views.decorators.http import require_GET, require_http_methods
 
 from django.contrib.auth.models import User
@@ -345,6 +347,14 @@ class AppLoginView(LoginView):
     redirect_authenticated_user = True
 
 
+class AppPasswordChangeView(SuccessMessageMixin, PasswordChangeView):
+    """Allow signed-in users to securely change their own account password."""
+
+    template_name = "outreach/password_change.html"
+    success_url = reverse_lazy("outreach:dashboard")
+    success_message = "Your password has been changed successfully."
+
+
 @login_required
 def dashboard(request):
     """
@@ -352,10 +362,11 @@ def dashboard(request):
     - Admins: see all clients by default; can filter to a specific member via ?member=<username>
     - Members: see only their own + shared (assigned_to=None) clients by default;
       can also view the full shared pool via ?view=all
-    Filterable by status via ?status=
+    Filterable by status, company, and industry.
     """
     status_filter = request.GET.get("status", "").strip()
     company_filter = request.GET.get("company", "").strip()
+    industry_filter = request.GET.get("industry", "").strip()
     member_filter = request.GET.get("member", "").strip()  # username, admin only
 
     is_admin_user = _is_admin(request.user)
@@ -378,11 +389,19 @@ def dashboard(request):
     company_choices = list(
         clients.order_by("company_name").values_list("company_name", flat=True).distinct()
     )
+    industry_choices = list(
+        clients.exclude(industry="")
+        .order_by("industry")
+        .values_list("industry", flat=True)
+        .distinct()
+    )
 
     if status_filter:
         clients = clients.filter(status=status_filter)
     if company_filter:
         clients = clients.filter(company_name__icontains=company_filter)
+    if industry_filter:
+        clients = clients.filter(industry__iexact=industry_filter)
 
     dashboard_stats = {
         "total_clients": clients.count(),
@@ -413,6 +432,8 @@ def dashboard(request):
         "active_filter": status_filter,
         "company_filter": company_filter,
         "company_choices": company_choices,
+        "industry_filter": industry_filter,
+        "industry_choices": industry_choices,
         "dashboard_stats": dashboard_stats,
         "is_admin_user": is_admin_user,
         "member_filter": member_filter,

@@ -15,6 +15,7 @@
         {% if active_filter %} · status <strong>{{ active_filter }}</strong>{% endif %}
         {% if member_filter %} · member <strong>{{ member_filter }}</strong>{% endif %}
         {% if company_filter %} · company <strong>{{ company_filter }}</strong>{% endif %}
+        {% if industry_filter %} · industry <strong>{{ industry_filter }}</strong>{% endif %}
       </p>
     </div>
     <div class="d-flex gap-2 flex-wrap">
@@ -54,23 +55,25 @@
 {% if is_admin_user %}
 <section class="surface-card fade-rise mb-4">
   <div class="card-body">
-    <div class="filter-section-title mb-3">Team Lens</div>
-    <div class="member-pills">
-      <a href="{% url 'outreach:dashboard' %}{% if active_filter or company_filter %}?{% endif %}{% if active_filter %}status={{ active_filter|urlencode }}{% endif %}{% if active_filter and company_filter %}&{% endif %}{% if company_filter %}company={{ company_filter|urlencode }}{% endif %}"
-         class="btn {% if not member_filter %}btn-dc-green{% else %}btn-outline-dc-green{% endif %}">
-        All Members
-      </a>
-      {% for m in all_members %}
-      <a href="?member={{ m.user.username|urlencode }}{% if active_filter %}&status={{ active_filter|urlencode }}{% endif %}{% if company_filter %}&company={{ company_filter|urlencode }}{% endif %}"
-         class="btn {% if member_filter == m.user.username %}btn-dc-green{% else %}btn-outline-dc-green{% endif %}">
-        <i class="bi bi-person me-1"></i>{{ m.user.get_full_name|default:m.user.username }}
-      </a>
-      {% endfor %}
-      <a href="?member=__shared__{% if active_filter %}&status={{ active_filter|urlencode }}{% endif %}{% if company_filter %}&company={{ company_filter|urlencode }}{% endif %}"
-         class="btn {% if member_filter == '__shared__' %}btn-dc-green{% else %}btn-outline-dc-green{% endif %}">
-        <i class="bi bi-globe me-1"></i>Shared Pool
-      </a>
-    </div>
+    <div class="filter-section-title mb-2">Team Lens</div>
+    <form method="get" class="row g-2 align-items-end">
+      {% if active_filter %}<input type="hidden" name="status" value="{{ active_filter }}">{% endif %}
+      {% if company_filter %}<input type="hidden" name="company" value="{{ company_filter }}">{% endif %}
+      {% if industry_filter %}<input type="hidden" name="industry" value="{{ industry_filter }}">{% endif %}
+      <div class="col-md-6 col-lg-4">
+        <label for="member-filter" class="form-label small fw-semibold text-muted mb-1">View contacts assigned to</label>
+        <select id="member-filter" name="member" class="form-select" onchange="this.form.submit()">
+          <option value=""{% if not member_filter %} selected{% endif %}>All Members</option>
+          {% for m in all_members %}
+          <option value="{{ m.user.username }}"{% if member_filter == m.user.username %} selected{% endif %}>{{ m.user.get_full_name|default:m.user.username }}</option>
+          {% endfor %}
+          <option value="__shared__"{% if member_filter == '__shared__' %} selected{% endif %}>Shared Pool</option>
+        </select>
+      </div>
+      <div class="col-md-auto">
+        <button type="submit" class="btn btn-outline-dc-green px-4">Apply</button>
+      </div>
+    </form>
   </div>
 </section>
 {% endif %}
@@ -78,8 +81,8 @@
 <section class="surface-card fade-rise mb-4">
   <div class="card-body">
     <div class="row g-4 align-items-end">
-      <div class="col-lg-6">
-        <div class="filter-section-title mb-3">Company Search</div>
+      <div class="col-lg-7">
+        <div class="filter-section-title mb-3">Contact Filters</div>
         <form method="get" class="row g-2 align-items-end">
           {% if member_filter %}
           <input type="hidden" name="member" value="{{ member_filter }}">
@@ -87,8 +90,8 @@
           {% if active_filter %}
           <input type="hidden" name="status" value="{{ active_filter }}">
           {% endif %}
-          <div class="col-md-8">
-            <label for="company-filter" class="form-label small fw-semibold text-muted mb-1">Access every contact from one company</label>
+          <div class="col-md-5">
+            <label for="company-filter" class="form-label small fw-semibold text-muted mb-1">Company</label>
             <input
               id="company-filter"
               type="text"
@@ -104,6 +107,15 @@
               {% endfor %}
             </datalist>
           </div>
+          <div class="col-md-4">
+            <label for="industry-filter" class="form-label small fw-semibold text-muted mb-1">Industry</label>
+            <select id="industry-filter" name="industry" class="form-select">
+              <option value="">All industries</option>
+              {% for industry in industry_choices %}
+              <option value="{{ industry }}"{% if industry_filter == industry %} selected{% endif %}>{{ industry }}</option>
+              {% endfor %}
+            </select>
+          </div>
           <div class="col-md-auto">
             <button type="submit" class="btn btn-dc-green w-100">
               <i class="bi bi-funnel me-1"></i>Apply
@@ -112,20 +124,20 @@
           <div class="col-md-auto">
             <a href="{% url 'outreach:dashboard' %}{% if member_filter or active_filter %}?{% endif %}{% if member_filter %}member={{ member_filter|urlencode }}{% endif %}{% if member_filter and active_filter %}&{% endif %}{% if active_filter %}status={{ active_filter|urlencode }}{% endif %}"
                class="btn btn-outline-secondary rounded-pill px-4 w-100">
-              Clear Company
+              Clear
             </a>
           </div>
         </form>
       </div>
-      <div class="col-lg-6">
+      <div class="col-lg-5">
         <div class="filter-section-title mb-3">Status Filters</div>
         <div class="filter-bar">
-          <a href="{% url 'outreach:dashboard' %}{% if member_filter or company_filter %}?{% endif %}{% if member_filter %}member={{ member_filter|urlencode }}{% endif %}{% if member_filter and company_filter %}&{% endif %}{% if company_filter %}company={{ company_filter|urlencode }}{% endif %}"
+          <a href="{% url 'outreach:dashboard' %}{% if member_filter or company_filter or industry_filter %}?{% endif %}{% if member_filter %}member={{ member_filter|urlencode }}{% endif %}{% if member_filter and company_filter %}&{% endif %}{% if company_filter %}company={{ company_filter|urlencode }}{% endif %}{% if industry_filter %}{% if member_filter or company_filter %}&{% endif %}industry={{ industry_filter|urlencode }}{% endif %}"
              class="btn {% if not active_filter %}btn-dc-green{% else %}btn-outline-dc-green{% endif %}">
             All
           </a>
           {% for value, label in status_choices %}
-          <a href="?status={{ value|urlencode }}{% if member_filter %}&member={{ member_filter|urlencode }}{% endif %}{% if company_filter %}&company={{ company_filter|urlencode }}{% endif %}"
+          <a href="?status={{ value|urlencode }}{% if member_filter %}&member={{ member_filter|urlencode }}{% endif %}{% if company_filter %}&company={{ company_filter|urlencode }}{% endif %}{% if industry_filter %}&industry={{ industry_filter|urlencode }}{% endif %}"
              class="btn {% if active_filter == value %}btn-dc-green{% else %}btn-outline-dc-green{% endif %}">
             {{ label }}
           </a>
@@ -165,7 +177,7 @@
           {% for client in clients %}
           <tr>
             <td class="ps-4">
-              <a href="?company={{ client.company_name|urlencode }}{% if active_filter %}&status={{ active_filter|urlencode }}{% endif %}{% if member_filter %}&member={{ member_filter|urlencode }}{% endif %}"
+              <a href="?company={{ client.company_name|urlencode }}{% if active_filter %}&status={{ active_filter|urlencode }}{% endif %}{% if member_filter %}&member={{ member_filter|urlencode }}{% endif %}{% if industry_filter %}&industry={{ industry_filter|urlencode }}{% endif %}"
                  class="company-link text-decoration-none">
                 {{ client.company_name }}
               </a>

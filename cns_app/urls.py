@@ -19,11 +19,12 @@ from django.contrib import admin
 from django.contrib.auth.views import LogoutView
 from django.urls import include, path
 
-from outreach.views import AppLoginView
+from outreach.views import AppLoginView, AppPasswordChangeView
 
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("login/", AppLoginView.as_view(), name="login"),
+    path("password/change/", AppPasswordChangeView.as_view(), name="password_change"),
     path("logout/", LogoutView.as_view(next_page="login"), name="logout"),
     path("", include("outreach.urls", namespace="outreach")),
 ]

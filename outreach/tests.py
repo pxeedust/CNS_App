@@ -168,6 +168,72 @@ class DashboardCompanyFilterTests(TestCase):
         self.assertIn("Acme Corp", response.context["company_choices"])
         self.assertIn("Beta Labs", response.context["company_choices"])
 
+    def test_dashboard_can_filter_by_industry_and_preserve_choices(self):
+        self.client.force_login(self.member)
+
+        response = self.client.get(
+            reverse("outreach:dashboard"),
+            {"industry": "Consulting"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            {client.pk for client in response.context["clients"]},
+            {self.acme_primary.pk, self.acme_secondary.pk},
+        )
+        self.assertEqual(response.context["industry_filter"], "Consulting")
+        self.assertEqual(
+            set(response.context["industry_choices"]),
+            {"Consulting", "SaaS"},
+        )
+
+    def test_industry_filter_combines_with_company_filter(self):
+        self.client.force_login(self.member)
+
+        response = self.client.get(
+            reverse("outreach:dashboard"),
+            {"company": "Acme", "industry": "SaaS"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(list(response.context["clients"]), [])
+
+
+class PasswordChangeFlowTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="password_user",
+            password="Current-password-2026!",
+        )
+        TeamMember.objects.create(user=self.user, role=TeamMember.Role.MEMBER)
+
+    def test_anonymous_user_is_sent_to_login(self):
+        response = self.client.get(reverse("password_change"))
+
+        self.assertRedirects(
+            response,
+            f"{reverse('login')}?next={reverse('password_change')}",
+        )
+
+    def test_user_can_change_password_and_remains_signed_in(self):
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse("password_change"),
+            {
+                "old_password": "Current-password-2026!",
+                "new_password1": "New-password-for-2026!",
+                "new_password2": "New-password-for-2026!",
+            },
+            follow=True,
+        )
+
+        self.assertRedirects(response, reverse("outreach:dashboard"))
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("New-password-for-2026!"))
+        self.assertEqual(int(self.client.session["_auth_user_id"]), self.user.pk)
+        self.assertContains(response, "Your password has been changed successfully.")
+
 
 class UserMailboxSettingsTests(TestCase):
     def setUp(self):
