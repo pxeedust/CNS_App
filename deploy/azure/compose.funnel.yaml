@@ -1,0 +1,5 @@
+services:
+  web:
+    # Funnel runs on the VM host. Keep Gunicorn reachable only from that host.
+    ports:
+      - "127.0.0.1:8000:8000"

@@ -8,6 +8,7 @@ dc() {
     --env-file .env.production \
     -f compose.yaml \
     -f deploy/azure/compose.free.yaml \
+    -f deploy/azure/compose.funnel.yaml \
     "$@"
 }
 

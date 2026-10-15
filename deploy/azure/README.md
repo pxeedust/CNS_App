@@ -148,7 +148,63 @@ before creating new production accounts. Replace `ubuntu` and the Oracle key
 path in its SCP example with `azureuser` and your Azure key path. The export
 contains sensitive mailbox credentials; never commit it.
 
-## 6. Operate the app
+## 6. Optional: public access through Tailscale Funnel
+
+Funnel provides a stable public `*.ts.net` HTTPS address without buying a domain.
+It requires the VM to have outbound Internet access, and Tailscale currently
+describes Funnel as beta with bandwidth limits. Keep the existing Azure public IP
+attached until the Funnel URL works and the subnet's outbound configuration has
+been checked. New private Azure subnets can lose outbound access when the VM's
+public IP is removed; a paid NAT Gateway would defeat the intended saving.
+
+Install Tailscale on the VM from its official Ubuntu package repository and run
+`sudo tailscale up --hostname=cns-outreach`. Open the URL it prints in your own
+browser to authenticate the VM. Install Tailscale on an administrator's computer
+too and verify SSH to the VM's Tailscale IP before removing Azure's public IP.
+With the VM's private IP (shown on its Azure Network settings page), run from
+the repository root on the VM:
+
+```bash
+bash deploy/azure/configure-funnel.sh YOUR-HOSTNAME.ts.net VM-PRIVATE-IP
+sudo docker compose --env-file .env.production \
+  -f compose.yaml -f deploy/azure/compose.free.yaml \
+  -f deploy/azure/compose.funnel.yaml config --quiet
+sudo docker compose --env-file .env.production \
+  -f compose.yaml -f deploy/azure/compose.free.yaml \
+  -f deploy/azure/compose.funnel.yaml up -d --no-deps web proxy
+curl -I -H "Host: YOUR-HOSTNAME.ts.net" \
+  -H "X-Forwarded-Proto: https" http://127.0.0.1:8000/login/
+sudo tailscale funnel --bg --https=443 http://127.0.0.1:8000
+sudo tailscale funnel status
+```
+
+Open the public Funnel URL from another device and verify sign-in and static
+assets. The override binds Gunicorn only to the VM's loopback address. Setting
+`PROXY_BIND_IP` binds Caddy to the VM's private IP so it does not conflict with
+Funnel on HTTPS port 443, while the old Azure URL stays available during the
+transition. The usual `deploy-free.sh` includes this override so later
+deployments retain that binding. The private IP should remain stable; if it
+changes, update `PROXY_BIND_IP` before recreating Caddy. Do not detach or delete
+the Azure public IP until SSH over Tailscale is working. After detaching, check
+the Funnel URL again before deleting the now-unused Azure public IP resource.
+Default outbound access is implicit and not a production reliability guarantee;
+if the Funnel stops working without the Azure IP, reattach it or use an explicit
+outbound option.
+
+On the existing `cns-outreach` VM, detaching the Azure public IP while it was
+running on 2026-10-15 made both Funnel and Tailscale SSH unreachable. Reattaching
+it restored both. A later stop/deallocate, public-IP dissociation, and start
+caused Azure to assign working default outbound access: the Funnel login page,
+static assets, Tailscale SSH, and outbound HTTPS all worked without the VM public
+IP. This is a tested current state, not a long-term availability guarantee:
+Azure describes default outbound access as implicit and subject to change.
+
+To inspect the Azure subnet, open Virtual networks > the VM's VNet > Subnets >
+the VM's subnet and check **Default outbound access** (private subnet setting),
+plus any NAT Gateway or load balancer outbound rule. If outbound is disabled and
+no other egress path exists, retain the VM public IP or plan a different host.
+
+## 7. Operate the app
 
 Use [the shared backup and update procedure](../oracle/README.md#6-backups-and-updates).
 Keep backups and encryption keys outside the VM as well. Docker volumes survive
